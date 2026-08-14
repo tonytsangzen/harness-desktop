@@ -660,6 +660,124 @@ extension NodeRuntimeManager: URLSessionDataDelegate {
     }
 }
 
+// MARK: - dsh version checking & update
+
+/// Checks the locally-cached `@deepseek-ai/dsh` version against the npm
+/// registry and (on demand) refreshes the npx cache + restarts the server.
+final class DSHUpdateManager {
+    private let packageSpec = "@deepseek-ai/dsh"
+
+    /// Version of the locally cached package, or nil if not yet cached.
+    var localVersion: String? {
+        guard let packageJSON = locateLocalPackageJSON() else { return nil }
+        let data = (try? Data(contentsOf: packageJSON)) ?? Data()
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = obj["version"] as? String else { return nil }
+        return version
+    }
+
+    /// Query the npm registry for the latest published version.
+    /// Completion is `(version, errorMessage)`; exactly one is non-nil.
+    func fetchLatestVersion(completion: @escaping (String?, String?) -> Void) {
+        guard let url = URL(string: "https://registry.npmjs.org/\(packageSpec)/latest") else {
+            completion(nil, "bad registry URL")
+            return
+        }
+        let task = URLSession.shared.dataTask(with: url) { data, response, error in
+            if let error = error {
+                completion(nil, error.localizedDescription)
+                return
+            }
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                  let data = data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let version = obj["version"] as? String else {
+                completion(nil, "could not read registry response")
+                return
+            }
+            completion(version, nil)
+        }
+        task.resume()
+    }
+
+    /// Whether an update is available (local version precedes the latest).
+    func updateAvailable(completion: @escaping (Bool, String?) -> Void) {
+        guard let local = localVersion else {
+            completion(false, nil)
+            return
+        }
+        fetchLatestVersion { latest, error in
+            if let latest = latest {
+                completion(latest != local, latest)
+            } else {
+                completion(false, nil)
+            }
+        }
+    }
+
+    /// Refresh the npx cache so the next `npx @deepseek-ai/dsh` resolves the
+    /// latest version, then report completion.
+    func refreshToLatest(completion: @escaping (Bool, String?) -> Void) {
+        // `npm cache clean` is too aggressive; instead clear the npx cache for
+        // this package and let npx re-install the latest on next invocation.
+        clearNpxCache(for: packageSpec)
+
+        // Pre-fetch so the subsequent server restart is fast.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["npx", "--yes", "\(packageSpec)@latest", "--version"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.terminationHandler = { proc in
+            if proc.terminationStatus == 0 {
+                completion(true, nil)
+            } else {
+                let out = String(data: pipe.fileHandleForReading.availableData, encoding: .utf8) ?? ""
+                completion(false, out.isEmpty ? "npx exited \(proc.terminationStatus)" : out)
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            completion(false, error.localizedDescription)
+        }
+    }
+
+    // MARK: - Helpers
+
+    private func locateLocalPackageJSON() -> URL? {
+        let base = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".npm/_npx", isDirectory: true)
+        guard let entries = try? FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        // Each npx run gets a hashed dir; find the first with our package.
+        for dir in entries {
+            let candidate = dir
+                .appendingPathComponent("node_modules/\(packageSpec)/package.json")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private func clearNpxCache(for packageSpec: String) {
+        let base = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".npm/_npx", isDirectory: true)
+        guard let entries = try? FileManager.default.contentsOfDirectory(at: base, includingPropertiesForKeys: nil) else {
+            return
+        }
+        for dir in entries {
+            let pkgDir = dir.appendingPathComponent("node_modules/\(packageSpec)")
+            if FileManager.default.fileExists(atPath: pkgDir.path) {
+                try? FileManager.default.removeItem(at: pkgDir)
+            }
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler {
     private var window: NSWindow!
     private var webView: WKWebView!
@@ -678,6 +796,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var activeDownloads: [WKDownload: NSKeyValueObservation] = [:]
     private var nativeDownloadObservation: NSKeyValueObservation?
     private var loadingOverlay: NSView?
+    private let updateManager = DSHUpdateManager()
+    private var updateCheckInFlight = false
 
     init(settings: Settings) {
         self.settings = settings
@@ -886,6 +1006,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             self.server.waitUntilReady(timeout: startupTimeoutSeconds, completion: { [weak self] in
                 DispatchQueue.main.async {
                     self?.loadUI()
+                    self?.autoCheckForUpdates()
                 }
             }, failure: { [weak self] in
                 DispatchQueue.main.async {
@@ -1024,6 +1145,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let appMenu = NSMenu()
         let appName = ProcessInfo.processInfo.processName
         appMenu.addItem(
+            withTitle: "Check for Updates…",
+            action: #selector(checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        appMenu.addItem(.separator())
+        appMenu.addItem(
             withTitle: "Quit \(appName)",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
@@ -1073,6 +1200,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func loadUI() {
         let request = URLRequest(url: server.activeURL)
         webView.load(request)
+    }
+
+    // MARK: - Update checking
+
+    /// Called once on launch (in the background) to check for a newer dsh
+    /// version without blocking startup.
+    private func autoCheckForUpdates() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            self.updateManager.updateAvailable { available, latest in
+                guard available, let latest = latest else { return }
+                DispatchQueue.main.async {
+                    self.presentUpdatePrompt(latestVersion: latest)
+                }
+            }
+        }
+    }
+
+    /// Menu action: manually check for updates.
+    @objc private func checkForUpdates(_ sender: Any?) {
+        guard !updateCheckInFlight else { return }
+        updateCheckInFlight = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            self.updateManager.updateAvailable { available, latest in
+                self.updateCheckInFlight = false
+                DispatchQueue.main.async {
+                    if available, let latest = latest {
+                        self.presentUpdatePrompt(latestVersion: latest)
+                    } else {
+                        self.showAlreadyUpToDate()
+                    }
+                }
+            }
+        }
+    }
+
+    private func presentUpdatePrompt(latestVersion: String) {
+        let local = updateManager.localVersion ?? "unknown"
+        let alert = NSAlert()
+        alert.messageText = "Update available"
+        alert.informativeText = "A newer version of DeepSeek Harness engine is available.\n\nCurrent: \(local)\nLatest: \(latestVersion)\n\nUpdate now?"
+        alert.addButton(withTitle: "Update")
+        alert.addButton(withTitle: "Later")
+        alert.alertStyle = .informational
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            performUpdate()
+        }
+    }
+
+    private func showAlreadyUpToDate() {
+        let alert = NSAlert()
+        alert.messageText = "Up to date"
+        alert.informativeText = "You are running the latest version."
+        alert.alertStyle = .informational
+        alert.runModal()
+    }
+
+    private func performUpdate() {
+        showLoadingOverlay(over: window.contentView ?? webView)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            self.updateManager.refreshToLatest { success, message in
+                DispatchQueue.main.async {
+                    self.dismissLoadingOverlay()
+                    if success {
+                        self.restartServerAfterUpdate()
+                    } else {
+                        self.showError("Update failed: \(message ?? "unknown error")")
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stop the current server and start a fresh one (which will resolve the
+    /// newly refreshed dsh version), then reload the UI.
+    private func restartServerAfterUpdate() {
+        server.stop()
+        showLoadingOverlay(over: window.contentView ?? webView)
+        server.start()
+        server.waitUntilReady(timeout: startupTimeoutSeconds, completion: { [weak self] in
+            DispatchQueue.main.async {
+                self?.webView.reload()
+                self?.dismissLoadingOverlay()
+            }
+        }, failure: { [weak self] in
+            DispatchQueue.main.async {
+                self?.dismissLoadingOverlay()
+                self?.showError("Server did not restart after update.")
+            }
+        })
     }
 
     // MARK: - Loading overlay
