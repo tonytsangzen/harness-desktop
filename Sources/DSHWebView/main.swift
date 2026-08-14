@@ -295,9 +295,18 @@ final class NodeRuntimeManager: NSObject {
     }
 
     private var downloadTask: URLSessionDownloadTask?
+    private var dataTask: URLSessionDataTask?
+    private var downloadData = Data()
+    private var downloadFileURL: URL?
     private var session: URLSession!
     private var observations: [ObjectIdentifier: (State) -> Void] = [:]
     private var state: State = .checking { didSet { if state != oldValue { notify(state) } } }
+
+    // Data-task state for accurate download progress.
+    private var receivedBytes: Int64 = 0
+    private var expectedBytes: Int64 = -1 {
+        didSet { updateDownloadProgress() }
+    }
 
     private(set) var nodeIsAvailable = false
 
@@ -307,22 +316,36 @@ final class NodeRuntimeManager: NSObject {
         session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }
 
+    // MARK: - Download mirror selection
+
+    /// The base URL for the Node.js dist (mirror chosen by the user's timezone
+    /// so users in China hit the faster npmmirror CDN instead of nodejs.org).
+    static var distBase: String {
+        if isMainlandChinaTimeZone() {
+            return "https://registry.npmmirror.com/-/binary/node"
+        }
+        return "https://nodejs.org/dist"
+    }
+
+    /// Heuristic: treat UTC+08:00 (±30 min) as mainland China for mirroring.
+    private static func isMainlandChinaTimeZone() -> Bool {
+        let seconds = TimeZone.current.secondsFromGMT()
+        let hours = Double(seconds) / 3600.0
+        return hours >= 7.5 && hours <= 8.5
+    }
+
     /// The official Node.js pkg download URL for the current macOS arch.
     static func downloadURL(forVersion version: String) -> URL? {
-        let arch: String
-        #if arch(arm64)
-        arch = "arm64"
-        #else
-        arch = "x64"
-        #endif
-        return URL(string: "https://nodejs.org/dist/\(version)/node-\(version).pkg")
+        // node-<version>.pkg exists on all mirrors; the .pkg installer itself
+        // is universal (works for both arm64 and x64).
+        return URL(string: "\(distBase)/\(version)/node-\(version).pkg")
     }
 
     /// Resolve the latest LTS version from the Node.js dist index; falls back
     /// to a pinned version on any error.
     static func resolveLatestLTS() -> String {
         let fallback = "v22.14.0"
-        guard let url = URL(string: "https://nodejs.org/dist/index.json") else { return fallback }
+        guard let url = URL(string: "\(distBase)/index.json") else { return fallback }
         let sem = DispatchSemaphore(value: 0)
         var result = fallback
         let task = URLSession.shared.dataTask(with: url) { data, _, _ in
@@ -342,9 +365,51 @@ final class NodeRuntimeManager: NSObject {
         return result
     }
 
-    /// Detect whether `node` and `npx` are both on PATH.
+    /// Detect whether `node` and `npx` are both available. Because a GUI
+    /// app's `PATH` is a minimal system default (it misses Homebrew and other
+    /// user paths), the search also probes common Node installation locations
+    /// directly instead of relying on `which` alone.
     static func runtimeAvailable() -> Bool {
-        (findExecutable(named: "node") != nil) && (findExecutable(named: "npx") != nil)
+        nodePath() != nil && npxPath() != nil
+    }
+
+    /// Common locations of the `node` binary outside the default GUI PATH.
+    private static var binaryCandidateDirs: [String] {
+        let home = NSHomeDirectory()
+        var dirs: [String] = [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "\(home)/.local/bin",
+            "\(home)/.volta/bin",
+            "\(home)/.fnm/aliases/default/bin",
+        ]
+        // nvm keeps versioned dirs; add the newest first.
+        let nvmVersions = "\(home)/.nvm/versions/node"
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: nvmVersions) {
+            dirs += entries.sorted().reversed().map { "\(nvmVersions)/\($0)/bin" }
+        }
+        return dirs
+    }
+
+    /// First found path to the `node` binary, or nil if none exists.
+    static func nodePath() -> String? {
+        if let p = findExecutable(named: "node") { return p }
+        for dir in binaryCandidateDirs {
+            let p = "\(dir)/node"
+            if FileManager.default.isExecutableFile(atPath: p) { return p }
+        }
+        return nil
+    }
+
+    /// First found path to the `npx` binary, or nil if none exists.
+    static func npxPath() -> String? {
+        if let p = findExecutable(named: "npx") { return p }
+        for dir in binaryCandidateDirs {
+            let p = "\(dir)/npx"
+            if FileManager.default.isExecutableFile(atPath: p) { return p }
+        }
+        return nil
     }
 
     private static func findExecutable(named name: String) -> String? {
@@ -400,22 +465,50 @@ final class NodeRuntimeManager: NSObject {
             return
         }
 
+        receivedBytes = 0
+        expectedBytes = -1
+        downloadData = Data()
         state = .downloading(0)
 
-        // Download to a temp file; session delegate reports progress.
-        downloadTask = session.downloadTask(with: url) { [weak self] tempURL, response, error in
+        // Use a data task so `expectedContentLength` from the HTTP response
+        // (not the often-unknown download-task total) drives an accurate bar.
+        dataTask = session.dataTask(with: url) { [weak self] data, response, error in
             guard let self = self else { return }
             if let error = error {
                 self.finishFailure("download failed: \(error.localizedDescription)", completion: completion)
                 return
             }
-            guard let tempURL = tempURL else {
-                self.finishFailure("download failed: no file", completion: completion)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                self.finishFailure("download failed: HTTP \(code)", completion: completion)
                 return
             }
-            self.install(from: tempURL, completion: completion)
+            guard let data = data, !data.isEmpty else {
+                self.finishFailure("download failed: empty file", completion: completion)
+                return
+            }
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("node-installer-\(UUID().uuidString).pkg")
+            do {
+                try data.write(to: tmp)
+            } catch {
+                self.finishFailure("download failed: could not save file", completion: completion)
+                return
+            }
+            self.install(from: tmp, completion: completion)
         }
-        downloadTask?.resume()
+        dataTask?.resume()
+    }
+
+    private func updateDownloadProgress() {
+        guard case .downloading = state else { return }
+        if expectedBytes > 0 {
+            let fraction = Double(receivedBytes) / Double(expectedBytes)
+            state = .downloading(min(max(fraction, 0), 1))
+        } else {
+            // Unknown total: show an indeterminate-but-moving indicator.
+            state = .downloading(-1)
+        }
     }
 
     private func install(from tempURL: URL, completion: @escaping (Bool, String?) -> Void) {
@@ -454,22 +547,27 @@ final class NodeRuntimeManager: NSObject {
 
     func cancel() {
         downloadTask?.cancel()
+        dataTask?.cancel()
         downloadTask = nil
+        dataTask = nil
         if case .downloading = state {
             state = .failed("cancelled")
         }
     }
 }
 
-extension NodeRuntimeManager: URLSessionDownloadDelegate {
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        // Handled in the completion handler of downloadTask(with:).
+extension NodeRuntimeManager: URLSessionDataDelegate {
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse, completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse {
+            self.expectedBytes = http.expectedContentLength
+        }
+        completionHandler(.allow)
     }
 
-    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard totalBytesExpectedToWrite > 0 else { return }
-        let fraction = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        state = .downloading(min(max(fraction, 0), 1))
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        downloadData.append(data)
+        receivedBytes = Int64(downloadData.count)
+        updateDownloadProgress()
     }
 }
 
@@ -515,8 +613,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             case .checking:
                 self.setStatus("Checking for Node.js…")
             case .downloading(let fraction):
-                self.setStatus(String(format: "Downloading Node.js… %.0f%%", fraction * 100))
-                self.progressBar?.doubleValue = fraction * 100
+                if fraction < 0 {
+                    // Unknown total size: show indeterminate spinner.
+                    self.setStatus("Downloading Node.js…")
+                    self.progressBar?.isIndeterminate = true
+                    self.progressBar?.startAnimation(nil)
+                } else {
+                    self.progressBar?.isIndeterminate = false
+                    self.progressBar?.stopAnimation(nil)
+                    self.progressBar?.doubleValue = fraction * 100
+                    self.setStatus(String(format: "Downloading Node.js… %.0f%%", fraction * 100))
+                }
             case .installing:
                 self.setStatus("Installing Node.js… (you may be prompted for your password)")
                 self.progressBar?.isIndeterminate = true
