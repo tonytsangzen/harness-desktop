@@ -23,7 +23,7 @@ Licensed under the [MIT License](LICENSE).
 ./build-app.sh
 ```
 
-This compiles the Swift release binary and assembles `dist/DeepSeek Harness.app`. The app icon (`AppIcon.icns`) is generated on first build via `scripts/generate-icon.sh` if it is missing.
+This compiles the Swift release binary and assembles `dist/DeepSeek Harness.app`, copying the committed `AppIcon.icns` into the bundle.
 
 ## Run
 
@@ -90,12 +90,10 @@ The [release workflow](.github/workflows/release.yml) builds the app, packages a
 ├── build-app.sh              Build script: compiles and assembles the .app
 ├── Package.swift             SwiftPM manifest (executable target DSHWebView)
 ├── Info.plist                Bundle configuration (identifier, icon, metadata)
-├── AppIcon.icns              Application icon (generated)
+├── AppIcon.icns              Application icon (committed)
 ├── .github/workflows/
 │   └── release.yml           CI: build, package DMG, and publish releases
 ├── scripts/
-│   ├── generate-icon.swift   Icon generator
-│   ├── generate-icon.sh      Icon generator entry point
 │   └── create-dmg.sh         DMG packaging script
 └── Sources/DSHWebView/
     └── main.swift            Application entry point, server manager, webview window

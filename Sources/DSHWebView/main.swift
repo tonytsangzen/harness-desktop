@@ -201,6 +201,85 @@ final class ServerManager {
 
 // MARK: - Window and WebView
 
+/// A WKWebView subclass that routes standard macOS editing shortcuts
+/// (Cmd+C/X/V/A) to the web content via JavaScript when the platform's
+/// default responder-chain handling does not apply to focused web elements.
+final class ShortcutWebView: WKWebView {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.type == .keyDown, event.modifierFlags.contains(.command) else {
+            return super.performKeyEquivalent(with: event)
+        }
+
+        guard let characters = event.charactersIgnoringModifiers?.lowercased(), !characters.isEmpty else {
+            return super.performKeyEquivalent(with: event)
+        }
+
+        switch characters {
+        case "x":
+            evaluateJavaScript("document.execCommand('cut')", completionHandler: nil)
+            return true
+        case "c":
+            evaluateJavaScript("document.execCommand('copy')", completionHandler: nil)
+            return true
+        case "a":
+            evaluateJavaScript("document.execCommand('selectAll')", completionHandler: nil)
+            return true
+        case "v":
+            pasteFromPasteboard()
+            return true
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
+    }
+
+    /// Paste the system clipboard text directly into the focused web element,
+    /// bypassing WebKit's clipboard-permission round-trip so a single Cmd+V
+    /// suffices.
+    private func pasteFromPasteboard() {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else {
+            // No text on the clipboard; fall back to the web's own paste.
+            evaluateJavaScript("document.execCommand('paste')", completionHandler: nil)
+            return
+        }
+
+        let script = """
+        (() => {
+            const text = \(Self.jsStringLiteral(text));
+            const el = document.activeElement;
+            if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) {
+                const start = el.selectionStart ?? el.value.length;
+                const end = el.selectionEnd ?? el.value.length;
+                el.value = el.value.slice(0, start) + text + el.value.slice(end);
+                const pos = start + text.length;
+                el.selectionStart = el.selectionEnd = pos;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                return true;
+            }
+            if (el && el.isContentEditable) {
+                document.execCommand('insertText', false, text);
+                return true;
+            }
+            return false;
+        })();
+        """
+        evaluateJavaScript(script, completionHandler: nil)
+    }
+
+    /// Render a Swift String as a JavaScript string literal (wrapped in double
+    /// quotes, with all characters that would break the literal escaped).
+    private static func jsStringLiteral(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
+        return "\"\(escaped)\""
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
@@ -214,6 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        buildMenu()
         buildWindow()
 
         let rect = NSRect(x: 0, y: 0, width: 1200, height: 800)
@@ -245,9 +325,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private func buildWindow() {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
-        let webView = WKWebView(frame: .zero, configuration: config)
+        let webView = ShortcutWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         self.webView = webView
+    }
+
+    /// Install a minimal main menu with the standard Edit shortcuts so that
+    /// Cmd+C/X/V/A work through the responder chain and the app menu bar.
+    private func buildMenu() {
+        let mainMenu = NSMenu()
+
+        // Application menu (Quit).
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        let appName = ProcessInfo.processInfo.processName
+        appMenu.addItem(
+            withTitle: "Quit \(appName)",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        appMenuItem.submenu = appMenu
+
+        // Edit menu (copy/paste/cut/select-all/undo/redo).
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(
+            withTitle: "Undo",
+            action: Selector(("undo:")),
+            keyEquivalent: "z"
+        )
+        editMenu.addItem(
+            withTitle: "Redo",
+            action: Selector(("redo:")),
+            keyEquivalent: "Z"
+        )
+        editMenu.addItem(.separator())
+        editMenu.addItem(
+            withTitle: "Cut",
+            action: #selector(NSText.cut(_:)),
+            keyEquivalent: "x"
+        )
+        editMenu.addItem(
+            withTitle: "Copy",
+            action: #selector(NSText.copy(_:)),
+            keyEquivalent: "c"
+        )
+        editMenu.addItem(
+            withTitle: "Paste",
+            action: #selector(NSText.paste(_:)),
+            keyEquivalent: "v"
+        )
+        editMenu.addItem(
+            withTitle: "Select All",
+            action: #selector(NSText.selectAll(_:)),
+            keyEquivalent: "a"
+        )
+        editMenuItem.submenu = editMenu
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func loadUI() {

@@ -24,10 +24,10 @@ jobs:
           xcode-version: "15.4"
 
       - name: Build app bundle
-        run: ./build-app.sh
+        run: bash build-app.sh
 
       - name: Create DMG
-        run: ./scripts/create-dmg.sh
+        run: bash scripts/create-dmg.sh
 
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
