@@ -280,11 +280,209 @@ final class ShortcutWebView: WKWebView {
     }
 }
 
+// MARK: - Node.js runtime provisioning
+
+/// Detects Node.js/npx and, when missing, downloads the official macOS .pkg
+/// installer and installs it, reporting progress and completion. The app needs
+/// Node at runtime to spawn `npx @deepseek-ai/dsh web`.
+final class NodeRuntimeManager: NSObject {
+    enum State: Equatable {
+        case checking
+        case downloading(Double)   // 0…1 progress
+        case installing
+        case done
+        case failed(String)
+    }
+
+    private var downloadTask: URLSessionDownloadTask?
+    private var session: URLSession!
+    private var observations: [ObjectIdentifier: (State) -> Void] = [:]
+    private var state: State = .checking { didSet { if state != oldValue { notify(state) } } }
+
+    private(set) var nodeIsAvailable = false
+
+    override init() {
+        super.init()
+        let config = URLSessionConfiguration.default
+        session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }
+
+    /// The official Node.js pkg download URL for the current macOS arch.
+    static func downloadURL(forVersion version: String) -> URL? {
+        let arch: String
+        #if arch(arm64)
+        arch = "arm64"
+        #else
+        arch = "x64"
+        #endif
+        return URL(string: "https://nodejs.org/dist/\(version)/node-\(version).pkg")
+    }
+
+    /// Resolve the latest LTS version from the Node.js dist index; falls back
+    /// to a pinned version on any error.
+    static func resolveLatestLTS() -> String {
+        let fallback = "v22.14.0"
+        guard let url = URL(string: "https://nodejs.org/dist/index.json") else { return fallback }
+        let sem = DispatchSemaphore(value: 0)
+        var result = fallback
+        let task = URLSession.shared.dataTask(with: url) { data, _, _ in
+            defer { sem.signal() }
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
+            for entry in json {
+                if let lts = entry["lts"] as? String, lts != "false", !lts.isEmpty,
+                   let version = entry["version"] as? String {
+                    result = version
+                    break
+                }
+            }
+        }
+        task.resume()
+        _ = sem.wait(timeout: .now() + 10)
+        return result
+    }
+
+    /// Detect whether `node` and `npx` are both on PATH.
+    static func runtimeAvailable() -> Bool {
+        (findExecutable(named: "node") != nil) && (findExecutable(named: "npx") != nil)
+    }
+
+    private static func findExecutable(named name: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [name]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (path?.isEmpty == false && process.terminationStatus == 0) ? path : nil
+    }
+
+    /// Subscribe to state changes. Returns a token for later removal.
+    func observe(_ handler: @escaping (State) -> Void) -> ObjectIdentifier {
+        let token = ObjectIdentifier(UUID() as NSUUID)
+        observations[token] = handler
+        handler(state)
+        return token
+    }
+
+    func removeObservation(_ token: ObjectIdentifier) {
+        observations.removeValue(forKey: token)
+    }
+
+    private func notify(_ state: State) {
+        DispatchQueue.main.async { [weak self] in
+            self?.observations.values.forEach { $0(state) }
+        }
+    }
+
+    /// Begin provisioning: if Node is already present, completes immediately;
+    /// otherwise download then install the official pkg.
+    /// `completion` is called on the main thread with `(ok, errorMessage)`.
+    func provide(completion: @escaping (Bool, String?) -> Void) {
+        if Self.runtimeAvailable() {
+            nodeIsAvailable = true
+            state = .done
+            completion(true, nil)
+            return
+        }
+
+        let version = Self.resolveLatestLTS()
+        guard let url = Self.downloadURL(forVersion: version) else {
+            finishFailure("unsupported architecture", completion: completion)
+            return
+        }
+
+        state = .downloading(0)
+
+        // Download to a temp file; session delegate reports progress.
+        downloadTask = session.downloadTask(with: url) { [weak self] tempURL, response, error in
+            guard let self = self else { return }
+            if let error = error {
+                self.finishFailure("download failed: \(error.localizedDescription)", completion: completion)
+                return
+            }
+            guard let tempURL = tempURL else {
+                self.finishFailure("download failed: no file", completion: completion)
+                return
+            }
+            self.install(from: tempURL, completion: completion)
+        }
+        downloadTask?.resume()
+    }
+
+    private func install(from tempURL: URL, completion: @escaping (Bool, String?) -> Void) {
+        state = .installing
+
+        // `installer` requires root; this triggers the system auth prompt.
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/installer")
+        process.arguments = ["-pkg", tempURL.path, "-target", "/"]
+        let outPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = outPipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            finishFailure("installer failed to launch: \(error.localizedDescription)", completion: completion)
+            return
+        }
+
+        // Refresh the process environment so PATH sees the newly installed node.
+        if process.terminationStatus == 0 || Self.runtimeAvailable() {
+            nodeIsAvailable = true
+            state = .done
+            completion(true, nil)
+        } else {
+            let output = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            finishFailure("installer exited \(process.terminationStatus): \(output.prefix(200))", completion: completion)
+        }
+    }
+
+    private func finishFailure(_ message: String, completion: @escaping (Bool, String?) -> Void) {
+        state = .failed(message)
+        completion(false, message)
+    }
+
+    func cancel() {
+        downloadTask?.cancel()
+        downloadTask = nil
+        if case .downloading = state {
+            state = .failed("cancelled")
+        }
+    }
+}
+
+extension NodeRuntimeManager: URLSessionDownloadDelegate {
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        // Handled in the completion handler of downloadTask(with:).
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let fraction = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
+        state = .downloading(min(max(fraction, 0), 1))
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private let settings: Settings
     private let server: ServerManager
+    private let runtimeManager = NodeRuntimeManager()
+    private var runtimeToken: ObjectIdentifier?
+    private var setupWindow: NSWindow?
+    private var progressBar: NSProgressIndicator?
+    private var statusLabel: NSTextField?
 
     init(settings: Settings) {
         self.settings = settings
@@ -295,31 +493,154 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
         buildWindow()
+        ensureNodeRuntime()
+    }
 
-        let rect = NSRect(x: 0, y: 0, width: 1200, height: 800)
-        window = NSWindow(
+    // MARK: - Runtime provisioning
+
+    /// Ensure Node.js is available before starting the dsh server. Missing
+    /// runtime shows a progress window while downloading/installing.
+    private func ensureNodeRuntime() {
+        // Fast path: already installed.
+        if NodeRuntimeManager.runtimeAvailable() {
+            startMainUI()
+            return
+        }
+
+        showSetupWindow()
+
+        runtimeToken = runtimeManager.observe { [weak self] state in
+            guard let self = self else { return }
+            switch state {
+            case .checking:
+                self.setStatus("Checking for Node.js…")
+            case .downloading(let fraction):
+                self.setStatus(String(format: "Downloading Node.js… %.0f%%", fraction * 100))
+                self.progressBar?.doubleValue = fraction * 100
+            case .installing:
+                self.setStatus("Installing Node.js… (you may be prompted for your password)")
+                self.progressBar?.isIndeterminate = true
+                self.progressBar?.startAnimation(nil)
+            case .done:
+                self.closeSetupWindow()
+                self.startMainUI()
+            case .failed(let message):
+                self.setupFailed(message)
+            }
+        }
+
+        runtimeManager.provide { [weak self] ok, _ in
+            // Failure is surfaced through the state observation above; success
+            // also arrives via the .done state. Nothing extra to do here.
+            _ = self
+            _ = ok
+        }
+    }
+
+    private func showSetupWindow() {
+        let rect = NSRect(x: 0, y: 0, width: 420, height: 140)
+        let win = NSWindow(
             contentRect: rect,
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        window.title = "DeepSeek Harness"
-        window.center()
-        window.contentView = webView
-        window.makeKeyAndOrderFront(nil)
+        win.title = "DeepSeek Harness"
+        win.isReleasedWhenClosed = false
+        win.center()
 
+        let content = NSView(frame: rect)
+
+        let label = NSTextField(labelWithString: "Preparing runtime…")
+        label.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        label.frame = NSRect(x: 20, y: 100, width: 380, height: 24)
+        content.addSubview(label)
+        statusLabel = label
+
+        let bar = NSProgressIndicator(frame: NSRect(x: 20, y: 60, width: 380, height: 20))
+        bar.isIndeterminate = false
+        bar.minValue = 0
+        bar.maxValue = 100
+        bar.doubleValue = 0
+        bar.style = .bar
+        content.addSubview(bar)
+        progressBar = bar
+
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelSetup))
+        cancel.frame = NSRect(x: 20, y: 20, width: 100, height: 28)
+        content.addSubview(cancel)
+
+        win.contentView = content
+        win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        setupWindow = win
+    }
 
-        server.start()
-        server.waitUntilReady(timeout: startupTimeoutSeconds, completion: { [weak self] in
-            DispatchQueue.main.async {
-                self?.loadUI()
+    private func setStatus(_ text: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.statusLabel?.stringValue = text
+        }
+    }
+
+    private func closeSetupWindow() {
+        DispatchQueue.main.async { [weak self] in
+            self?.setupWindow?.close()
+            self?.setupWindow = nil
+            if let token = self?.runtimeToken {
+                self?.runtimeManager.removeObservation(token)
             }
-        }, failure: { [weak self] in
-            DispatchQueue.main.async {
-                self?.showError("DeepSeek Harness server did not start within \(Int(startupTimeoutSeconds)) seconds.")
-            }
-        })
+        }
+    }
+
+    @objc private func cancelSetup() {
+        runtimeManager.cancel()
+        closeSetupWindow()
+        NSApp.terminate(nil)
+    }
+
+    private func setupFailed(_ message: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.closeSetupWindow()
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Runtime installation failed"
+            alert.informativeText = "Could not install Node.js, which is required to run DeepSeek Harness.\n\n\(message)\n\nInstall Node.js 22+ manually, then relaunch."
+            alert.addButton(withTitle: "Quit")
+            alert.runModal()
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func startMainUI() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+
+            let rect = NSRect(x: 0, y: 0, width: 1200, height: 800)
+            let win = NSWindow(
+                contentRect: rect,
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            win.title = "DeepSeek Harness"
+            win.center()
+            win.contentView = self.webView
+            win.makeKeyAndOrderFront(nil)
+            self.window = win
+            NSApp.activate(ignoringOtherApps: true)
+
+            self.server.start()
+            self.server.waitUntilReady(timeout: startupTimeoutSeconds, completion: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.loadUI()
+                }
+            }, failure: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.showError("DeepSeek Harness server did not start within \(Int(startupTimeoutSeconds)) seconds.")
+                }
+            })
+        }
     }
 
     private func buildWindow() {
