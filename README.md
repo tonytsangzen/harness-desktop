@@ -169,6 +169,7 @@ Notes:
 ├── Package.swift             SwiftPM manifest (executable target DSHWebView)
 ├── Info.plist                Bundle configuration (identifier, icon, metadata)
 ├── AppIcon.icns              Application icon (committed)
+├── CHANGELOG.md              Release notes (Keep a Changelog)
 ├── .github/workflows/
 │   └── release.yml           CI: build, package DMG, and publish releases
 ├── scripts/
