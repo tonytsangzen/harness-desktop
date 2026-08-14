@@ -365,12 +365,34 @@ final class NodeRuntimeManager: NSObject {
         return result
     }
 
-    /// Detect whether `node` and `npx` are both available. Because a GUI
-    /// app's `PATH` is a minimal system default (it misses Homebrew and other
-    /// user paths), the search also probes common Node installation locations
-    /// directly instead of relying on `which` alone.
+    /// Detect whether `node` and `npx` are both available **and actually
+    /// executable**. Because a GUI app's `PATH` is a minimal system default
+    /// (it misses Homebrew and other user paths), the search probes common
+    /// Node install locations directly, then verifies by running
+    /// `node --version` and `npx --version` (a binary that merely exists but
+    /// is broken — e.g. a dangling symlink — is treated as missing).
     static func runtimeAvailable() -> Bool {
-        nodePath() != nil && npxPath() != nil
+        guard let node = nodePath(), let npx = npxPath() else { return false }
+        return runsVersion(executable: node) && runsVersion(executable: npx)
+    }
+
+    /// Run `<executable> --version` and report whether it exits 0 with output.
+    private static func runsVersion(executable: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = ["--version"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return false
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return process.terminationStatus == 0 && !(output?.isEmpty ?? true)
     }
 
     /// Common locations of the `node` binary outside the default GUI PATH.
@@ -571,7 +593,7 @@ extension NodeRuntimeManager: URLSessionDataDelegate {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler {
     private var window: NSWindow!
     private var webView: WKWebView!
     private let settings: Settings
@@ -581,6 +603,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private var setupWindow: NSWindow?
     private var progressBar: NSProgressIndicator?
     private var statusLabel: NSTextField?
+    private var pendingSuggestedFilename: String?
+    private var pendingDownloadDestination: URL?
+    private var downloadBar: NSProgressIndicator?
+    private var downloadLabel: NSTextField?
+    private var downloadBarContainer: NSView?
+    private var activeDownloads: [WKDownload: NSKeyValueObservation] = [:]
+    private var nativeDownloadObservation: NSKeyValueObservation?
 
     init(settings: Settings) {
         self.settings = settings
@@ -732,7 +761,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
             )
             win.title = "DeepSeek Harness"
             win.center()
-            win.contentView = self.webView
+
+            // Container: webView fills the window, with a download progress
+            // bar overlaid at the bottom (hidden until a download starts).
+            let container = NSView(frame: rect)
+            self.webView.frame = container.bounds
+            self.webView.autoresizingMask = [.width, .height]
+            container.addSubview(self.webView)
+
+            let barContainer = NSView(frame: NSRect(x: 0, y: 0, width: rect.width, height: 32))
+            barContainer.autoresizingMask = [.width]
+            barContainer.wantsLayer = true
+            barContainer.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+
+            let bar = NSProgressIndicator(frame: NSRect(x: 12, y: 12, width: rect.width - 24, height: 14))
+            bar.isIndeterminate = false
+            bar.minValue = 0
+            bar.maxValue = 100
+            bar.doubleValue = 0
+            bar.style = .bar
+            bar.autoresizingMask = [.width]
+            barContainer.addSubview(bar)
+            self.downloadBar = bar
+
+            let label = NSTextField(labelWithString: "")
+            label.font = NSFont.systemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+            label.frame = NSRect(x: 12, y: 0, width: rect.width - 24, height: 12)
+            label.autoresizingMask = [.width]
+            label.lineBreakMode = .byTruncatingTail
+            barContainer.addSubview(label)
+            self.downloadLabel = label
+
+            // Pin barContainer to the bottom of the container.
+            barContainer.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(barContainer)
+            NSLayoutConstraint.activate([
+                barContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                barContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                barContainer.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                barContainer.heightAnchor.constraint(equalToConstant: 32),
+            ])
+            self.downloadBarContainer = barContainer
+            barContainer.isHidden = true
+
+            win.contentView = container
             win.makeKeyAndOrderFront(nil)
             self.window = win
             NSApp.activate(ignoringOtherApps: true)
@@ -753,9 +826,118 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
     private func buildWindow() {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
+
+        // Inject a script that intercepts programmatic <a download> clicks
+        // (which WebKit does not reliably deliver as navigation downloads) and
+        // forwards them to native for a URLSession-based download.
+        let contentController = WKUserContentController()
+        contentController.add(self, name: "download")
+        contentController.addUserScript(WKUserScript(
+            source: Self.downloadInterceptorScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false
+        ))
+        config.userContentController = contentController
+
         let webView = ShortcutWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
         self.webView = webView
+    }
+
+    /// JavaScript that hooks <a download> clicks and posts them to native via
+    /// webkit.messageHandlers.download.
+    private static let downloadInterceptorScript = """
+    (() => {
+        const originalClick = HTMLAnchorElement.prototype.click;
+        HTMLAnchorElement.prototype.click = function () {
+            const href = this.href || this.getAttribute('href');
+            const download = this.download || this.getAttribute('download');
+            if (download !== undefined && download !== null && download !== '' && href) {
+                try {
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.download) {
+                        window.webkit.messageHandlers.download.postMessage({
+                            url: href,
+                            filename: download || ''
+                        });
+                        return;
+                    }
+                } catch (e) {}
+            }
+            return originalClick.call(this);
+        };
+    })();
+    """
+
+    // MARK: - Web download support
+
+    /// Intercept navigation actions that explicitly request a download (for
+    /// example `<a download>` anchors, which the Session ZIP export uses).
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        NSLog("DSHWebView navigationAction: url=%@ shouldPerformDownload=%@",
+              navigationAction.request.url?.absoluteString ?? "nil",
+              String(describing: navigationAction.shouldPerformDownload))
+        // macOS 11+: WKNavigationAction.shouldPerformDownload is set when the
+        // web content asks the browser to download rather than navigate.
+        if #available(macOS 11.3, *), navigationAction.shouldPerformDownload {
+            pendingSuggestedFilename = navigationAction.request.url?.lastPathComponent ?? "download"
+            decisionHandler(.download)
+            return
+        }
+        decisionHandler(.allow)
+    }
+
+    /// Detect a download response and route it to a WKDownload (with a save
+    /// panel to choose the destination).
+    func webView(_ webView: WKWebView,
+                 decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        let response = navigationResponse.response
+        NSLog("DSHWebView navigationResponse: mime=%@ url=%@ isMainFrame=%@",
+              response.mimeType ?? "nil",
+              response.url?.absoluteString ?? "nil",
+              String(describing: navigationResponse.isForMainFrame))
+
+        if navigationResponse.isForMainFrame {
+            decisionHandler(.allow)
+            return
+        }
+
+        let isDownload = Self.looksLikeDownload(response)
+        NSLog("DSHWebView navigationResponse looksLikeDownload=%@", String(isDownload))
+
+        if isDownload {
+            pendingSuggestedFilename = response.suggestedFilename ?? "download"
+            decisionHandler(.download)
+        } else {
+            decisionHandler(.allow)
+        }
+    }
+
+    /// Heuristic for whether a response should be downloaded rather than
+    /// rendered inline.
+    private static func looksLikeDownload(_ response: URLResponse) -> Bool {
+        let mime = (response.mimeType ?? "").lowercased()
+
+        // Explicit attachment disposition always means download.
+        if let http = response as? HTTPURLResponse,
+           let disposition = http.value(forHTTPHeaderField: "Content-Disposition"),
+           disposition.lowercased().contains("attachment") {
+            return true
+        }
+
+        // MIME types WKWebView can render inline.
+        let renderable = [
+            "text/html", "text/plain", "application/xhtml+xml",
+            "image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
+            "text/css", "application/javascript", "application/json",
+        ]
+        if mime.isEmpty { return false }
+        if renderable.contains(mime) { return false }
+        // Text/* is generally renderable inline.
+        if mime.hasPrefix("text/") { return false }
+        return true
     }
 
     /// Install a minimal main menu with the standard Edit shortcuts so that
@@ -834,6 +1016,170 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+}
+
+// MARK: - WKDownloadDelegate
+
+extension AppDelegate {
+    func download(_ download: WKDownload,
+                  decideDestinationUsing response: URLResponse,
+                  suggestedFilename: String,
+                  completionHandler: @escaping (URL?) -> Void) {
+        NSLog("DSHWebView download decideDestination: name=%@ pendingName=%@",
+              suggestedFilename, pendingSuggestedFilename ?? "nil")
+        let name = pendingSuggestedFilename ?? suggestedFilename
+        pendingSuggestedFilename = nil
+
+        DispatchQueue.main.async {
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = name
+            panel.canCreateDirectories = true
+            panel.begin { [weak self] result in
+                guard let self = self else { completionHandler(nil); return }
+                if result == .OK, let url = panel.url {
+                    self.pendingDownloadDestination = url
+                    completionHandler(url)
+                    self.beginDownloadProgress(download, filename: name)
+                } else {
+                    completionHandler(nil)   // cancel the download
+                }
+            }
+        }
+    }
+
+    private func beginDownloadProgress(_ download: WKDownload, filename: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.downloadBarContainer?.isHidden = false
+            self.downloadBar?.doubleValue = 0
+
+            let obs = download.progress.observe(\.fractionCompleted, options: [.new]) { [weak self] progress, _ in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    let percent = progress.fractionCompleted * 100
+                    self.downloadBar?.doubleValue = percent
+                    self.downloadLabel?.stringValue = String(format: "%@ — %.0f%%", filename, percent)
+                }
+            }
+            self.activeDownloads[download] = obs
+        }
+    }
+
+    func downloadDidFinish(_ download: WKDownload) {
+        activeDownloads[download]?.invalidate()
+        activeDownloads[download] = nil
+        pendingDownloadDestination = nil
+        DispatchQueue.main.async { [weak self] in
+            self?.downloadBarContainer?.isHidden = true
+            self?.downloadBar?.doubleValue = 0
+        }
+    }
+
+    func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+        activeDownloads[download]?.invalidate()
+        activeDownloads[download] = nil
+        pendingDownloadDestination = nil
+        DispatchQueue.main.async { [weak self] in
+            self?.downloadBarContainer?.isHidden = true
+            self?.showError("Download failed: \(error.localizedDescription)")
+        }
+    }
+}
+
+// MARK: - WKScriptMessageHandler (JS-intercepted downloads)
+
+extension AppDelegate {
+    func userContentController(_ userContentController: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard message.name == "download",
+              let body = message.body as? [String: Any],
+              let urlString = body["url"] as? String,
+              let url = URL(string: urlString) else {
+            return
+        }
+        let filename = (body["filename"] as? String) ?? url.lastPathComponent
+        performNativeDownload(url: url, suggestedFilename: filename.isEmpty ? url.lastPathComponent : filename)
+    }
+
+    /// Download a URL using URLSession (bypassing WebKit's download navigation),
+    /// with a save panel and the shared bottom progress bar.
+    private func performNativeDownload(url: URL, suggestedFilename: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = suggestedFilename
+            panel.canCreateDirectories = true
+            panel.begin { [weak self] result in
+                guard let self = self, result == .OK, let destination = panel.url else { return }
+                self.startNativeDownload(url: url, to: destination, filename: suggestedFilename)
+            }
+        }
+    }
+
+    private func startNativeDownload(url: URL, to destination: URL, filename: String) {
+        var request = URLRequest(url: url)
+        // The session export endpoint is GET; carry cookies/headers as needed.
+        request.httpMethod = "GET"
+
+        let task = URLSession.shared.downloadTask(with: request) { [weak self] tempURL, response, error in
+            guard let self = self else { return }
+            if let error = error {
+                DispatchQueue.main.async {
+                    self.downloadBarContainer?.isHidden = true
+                    self.showError("Download failed: \(error.localizedDescription)")
+                }
+                return
+            }
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                DispatchQueue.main.async {
+                    self.downloadBarContainer?.isHidden = true
+                    self.showError("Download failed: bad HTTP response")
+                }
+                return
+            }
+            guard let tempURL = tempURL else {
+                DispatchQueue.main.async {
+                    self.downloadBarContainer?.isHidden = true
+                    self.showError("Download failed: no data")
+                }
+                return
+            }
+            do {
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.removeItem(at: destination)
+                }
+                try FileManager.default.moveItem(at: tempURL, to: destination)
+                DispatchQueue.main.async {
+                    self.downloadBarContainer?.isHidden = true
+                    self.downloadBar?.doubleValue = 0
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.downloadBarContainer?.isHidden = true
+                    self.showError("Download failed: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        // Observe progress and drive the shared bottom bar.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.downloadBarContainer?.isHidden = false
+            self.downloadBar?.doubleValue = 0
+            self.downloadLabel?.stringValue = filename
+        }
+
+        let observation = task.progress.observe(\.fractionCompleted, options: [.new]) { [weak self] progress, _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let percent = progress.fractionCompleted * 100
+                self.downloadBar?.doubleValue = percent
+                self.downloadLabel?.stringValue = String(format: "%@ — %.0f%%", filename, percent)
+            }
+        }
+        nativeDownloadObservation = observation
+        task.resume()
     }
 }
 
