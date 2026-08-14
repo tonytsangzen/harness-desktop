@@ -308,9 +308,24 @@ final class ShortcutWebView: WKWebView {
             if (el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT')) {
                 const start = el.selectionStart ?? el.value.length;
                 const end = el.selectionEnd ?? el.value.length;
-                el.value = el.value.slice(0, start) + text + el.value.slice(end);
+                const next = el.value.slice(0, start) + text + el.value.slice(end);
+
+                // Use the native value setter so React's value tracker sees the
+                // change (React overrides the `value` property on the instance,
+                // which would otherwise swallow a plain `el.value = ...`).
+                const proto = el.tagName === 'TEXTAREA'
+                    ? HTMLTextAreaElement.prototype
+                    : HTMLInputElement.prototype;
+                const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+                setter.call(el, next);
+
+                // Set cursor position after the inserted text.
                 const pos = start + text.length;
-                el.selectionStart = el.selectionEnd = pos;
+                try {
+                    el.setSelectionRange(pos, pos);
+                } catch (_) {}
+
+                // Notify React via the `input` event it listens for.
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 return true;
             }
