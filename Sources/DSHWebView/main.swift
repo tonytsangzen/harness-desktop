@@ -123,9 +123,29 @@ final class ServerManager {
         // selection when the configured one is occupied by another process.
         activePort = resolveFreePort(startingAt: settings.port)
 
+        let args = command(forPort: activePort)
+
+        // Resolve node/npx to absolute paths so launch doesn't depend on the
+        // minimal GUI PATH (which typically omits Homebrew and other dirs).
+        // The spawned dsh web process also needs `node` on its PATH for nested
+        // node invocations, so prepend the discovered bin dirs.
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = command(forPort: activePort)
+        var environment = ProcessInfo.processInfo.environment
+        let first = args.first
+        if first == "npx", let npxPath = NodeRuntimeManager.npxPath() {
+            // Run npx by absolute path, dropping the bare `npx` argv[0].
+            process.executableURL = URL(fileURLWithPath: npxPath)
+            process.arguments = Array(args.dropFirst())
+        } else {
+            // Custom command (or npx not found): launch via env with PATH.
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = args
+        }
+        if let binDir = NodeRuntimeManager.binDirectoryFromNodePath() {
+            let existing = environment["PATH"] ?? ""
+            environment["PATH"] = "\(binDir):\(existing)"
+        }
+        process.environment = environment
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -412,6 +432,15 @@ final class NodeRuntimeManager: NSObject {
         nodePath() != nil && npxPath() != nil
     }
 
+    // MARK: Cached binary discovery
+
+    /// Cached results so repeated lookups (runtime check + child-process PATH
+    /// wiring) do not re-spawn `/usr/bin/which` or re-walk candidate dirs on
+    /// every call — this is the main source of slow app startup.
+    private static let lookupLock = NSLock()
+    private static var cachedNodePath: String??
+    private static var cachedNpxPath: String??
+
     /// Common locations of the `node` binary outside the default GUI PATH.
     private static var binaryCandidateDirs: [String] {
         let home = NSHomeDirectory()
@@ -433,22 +462,43 @@ final class NodeRuntimeManager: NSObject {
 
     /// First found path to the `node` binary, or nil if none exists.
     static func nodePath() -> String? {
-        if let p = findExecutable(named: "node") { return p }
-        for dir in binaryCandidateDirs {
-            let p = "\(dir)/node"
-            if FileManager.default.isExecutableFile(atPath: p) { return p }
-        }
-        return nil
+        lookupLock.lock()
+        if let cached = cachedNodePath { let v = cached; lookupLock.unlock(); return v }
+        lookupLock.unlock()
+
+        let result = findExecutable(named: "node") ?? binaryCandidateDirs
+            .lazy
+            .map { "\($0)/node" }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+
+        lookupLock.lock()
+        cachedNodePath = result
+        lookupLock.unlock()
+        return result
     }
 
     /// First found path to the `npx` binary, or nil if none exists.
     static func npxPath() -> String? {
-        if let p = findExecutable(named: "npx") { return p }
-        for dir in binaryCandidateDirs {
-            let p = "\(dir)/npx"
-            if FileManager.default.isExecutableFile(atPath: p) { return p }
-        }
-        return nil
+        lookupLock.lock()
+        if let cached = cachedNpxPath { let v = cached; lookupLock.unlock(); return v }
+        lookupLock.unlock()
+
+        let result = findExecutable(named: "npx") ?? binaryCandidateDirs
+            .lazy
+            .map { "\($0)/npx" }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
+
+        lookupLock.lock()
+        cachedNpxPath = result
+        lookupLock.unlock()
+        return result
+    }
+
+    /// Directory containing the discovered `node` binary, used to prepend to a
+    /// child process's `PATH` so nested `node`/`npx` invocations resolve.
+    static func binDirectoryFromNodePath() -> String? {
+        guard let node = nodePath() else { return nil }
+        return (node as NSString).deletingLastPathComponent
     }
 
     private static func findExecutable(named name: String) -> String? {
@@ -627,6 +677,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var downloadBarContainer: NSView?
     private var activeDownloads: [WKDownload: NSKeyValueObservation] = [:]
     private var nativeDownloadObservation: NSKeyValueObservation?
+    private var loadingOverlay: NSView?
 
     init(settings: Settings) {
         self.settings = settings
@@ -827,6 +878,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             self.window = win
             NSApp.activate(ignoringOtherApps: true)
 
+            // Show a loading overlay over the (still-empty) webview so the
+            // user isn't staring at a blank window while the server starts.
+            self.showLoadingOverlay(over: container)
+
             self.server.start()
             self.server.waitUntilReady(timeout: startupTimeoutSeconds, completion: { [weak self] in
                 DispatchQueue.main.async {
@@ -834,6 +889,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 }
             }, failure: { [weak self] in
                 DispatchQueue.main.async {
+                    self?.dismissLoadingOverlay()
                     self?.showError("DeepSeek Harness server did not start within \(Int(startupTimeoutSeconds)) seconds.")
                 }
             })
@@ -1017,6 +1073,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func loadUI() {
         let request = URLRequest(url: server.activeURL)
         webView.load(request)
+    }
+
+    // MARK: - Loading overlay
+
+    private func showLoadingOverlay(over container: NSView) {
+        let overlay = NSView(frame: container.bounds)
+        overlay.autoresizingMask = [.width, .height]
+        overlay.wantsLayer = true
+        overlay.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+
+        let spinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 32, height: 32))
+        spinner.style = .spinning
+        spinner.isIndeterminate = true
+        spinner.controlSize = .regular
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(spinner)
+
+        let label = NSTextField(labelWithString: "Starting DeepSeek Harness…")
+        label.font = NSFont.systemFont(ofSize: 13)
+        label.textColor = .secondaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            spinner.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: overlay.centerYAnchor, constant: -16),
+            label.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+            label.topAnchor.constraint(equalTo: spinner.bottomAnchor, constant: 12),
+        ])
+        spinner.startAnimation(nil)
+
+        overlay.layer?.zPosition = 10
+        container.addSubview(overlay, positioned: .above, relativeTo: container.subviews.first)
+        loadingOverlay = overlay
+    }
+
+    private func dismissLoadingOverlay() {
+        DispatchQueue.main.async { [weak self] in
+            self?.loadingOverlay?.removeFromSuperview()
+            self?.loadingOverlay = nil
+        }
+    }
+
+    // MARK: - WKNavigationDelegate (page load)
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        dismissLoadingOverlay()
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        dismissLoadingOverlay()
     }
 
     private func showError(_ message: String) {
