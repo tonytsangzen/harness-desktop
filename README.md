@@ -90,19 +90,23 @@ swift run DSHWebView
 On launch the app:
 
 1. Checks for Node.js and installs it if missing (see [Runtime provisioning](#runtime-provisioning)).
-2. Spawns `npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080`.
-3. Polls `127.0.0.1:3080` until the server accepts connections (up to 180 s).
-4. Loads `http://127.0.0.1:3080/` in the `WKWebView` and shows the window.
+2. Spawns `npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080` (or an automatically chosen free port — see below).
+3. Polls the server until it accepts connections (up to 180 s).
+4. Loads the served page in the `WKWebView` and shows the window.
 5. Terminates the child process when the last window closes.
 
 The first launch downloads `@deepseek-ai/dsh` via npx, so startup can take a while.
+
+### Port selection
+
+If the configured port (default `3080`) is already in use by another process, the app **does not kill it**; it automatically picks the next free port and starts the server there, loading the same port in the webview. The configured port is still preferred when it is available.
 
 ## Configuration
 
 | CLI flag | Default | Effect |
 | --- | --- | --- |
 | `--host <host>` | `127.0.0.1` | Host for the dsh web server |
-| `--port <port>` | `3080` | Port for the dsh web server |
+| `--port <port>` | `3080` | Preferred port for the dsh web server (falls back to a free port if taken) |
 | `--command "<cmd>"` | `npx @deepseek-ai/dsh web` | Full launch command (space-separated) |
 | `--help`, `-h` | — | Print usage to stderr and exit |
 

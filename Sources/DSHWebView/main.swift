@@ -105,16 +105,27 @@ final class ServerManager {
     private var process: Process?
     private var probeTimer: Timer?
 
+    /// The port actually used this launch (may differ from `settings.port` if
+    /// that port was taken, in which case a free port was chosen automatically).
+    private(set) var activePort: UInt16
+    /// The URL the webview should load for this launch.
+    var activeURL: URL { URL(string: "http://\(settings.host):\(activePort)/")! }
+
     init(settings: Settings) {
         self.settings = settings
+        self.activePort = settings.port
     }
 
     /// Spawn the server process. Streams its output to the app's stdout so
     /// logs stay observable from a terminal launch.
     func start() {
+        // Choose a port that is actually free, falling back to automatic
+        // selection when the configured one is occupied by another process.
+        activePort = resolveFreePort(startingAt: settings.port)
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = settings.dshCommand
+        process.arguments = command(forPort: activePort)
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -158,7 +169,7 @@ final class ServerManager {
             failure()
             return
         }
-        if isPortOpen(host: settings.host, port: settings.port) {
+        if isPortOpen(host: settings.host, port: activePort) {
             completion()
             return
         }
@@ -187,6 +198,34 @@ final class ServerManager {
             }
         }
         return result == 0
+    }
+
+    /// Find a free port to bind. If `startingAt` is available it is returned;
+    /// otherwise ports are probed incrementally (avoiding the configured port
+    /// staying blocked by another process).
+    private func resolveFreePort(startingAt preferred: UInt16) -> UInt16 {
+        var candidate = preferred
+        for _ in 0..<512 {
+            if !isPortOpen(host: settings.host, port: candidate) {
+                return candidate
+            }
+            if candidate >= 49151 { candidate = 3080 } else { candidate += 1 }
+        }
+        // Should never happen; fall back to the preferred port and let the
+        // server's own startup error surface if it still fails.
+        return preferred
+    }
+
+    /// Build the dsh web command for a specific port. If the configured command
+    /// carries its own `--port <n>`, the value is replaced; commands without a
+    /// `--port` are left as-is (custom commands are taken at face value).
+    private func command(forPort port: UInt16) -> [String] {
+        var args = settings.dshCommand
+        for (i, a) in args.enumerated() where a == "--port" && i + 1 < args.count {
+            args[i + 1] = String(port)
+            return args
+        }
+        return args
     }
 
     /// Terminate the child process tree on app quit.
@@ -976,7 +1015,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     private func loadUI() {
-        let request = URLRequest(url: settings.url)
+        let request = URLRequest(url: server.activeURL)
         webView.load(request)
     }
 
