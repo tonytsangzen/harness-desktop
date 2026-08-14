@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-14
+
+### 修复
+
+- 页面内「Session ZIP」下载不触发：新增 JS 拦截 `<a download>` 点击并通过 `URLSession` 原生下载，绕开 WebKit 对程序化下载导航支持不可靠的问题。
+- 下载进度不更新：改用 `URLSessionDataTask` 读取 `expectedContentLength`，未知总量时退化为不确定进度条。
+- 系统已装 Node 仍走安装流程：Node/npx 检测改为探测常见安装路径并执行 `--version` 校验有效性。
+
 ## [1.0.0] - 2026-08-14
 
 ### 新增

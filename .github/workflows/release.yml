@@ -23,10 +23,27 @@ jobs:
         with:
           xcode-version: "15.4"
 
+      - name: Resolve version
+        id: version
+        run: |
+          # Prefer the tag ref (e.g. refs/tags/v1.0.1 -> 1.0.1); fall back to
+          # a run number for manual dispatch.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="$(date +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
       - name: Build app bundle
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: bash build-app.sh
 
       - name: Create DMG
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: bash scripts/create-dmg.sh
 
       - name: Upload DMG artifact

@@ -365,34 +365,12 @@ final class NodeRuntimeManager: NSObject {
         return result
     }
 
-    /// Detect whether `node` and `npx` are both available **and actually
-    /// executable**. Because a GUI app's `PATH` is a minimal system default
-    /// (it misses Homebrew and other user paths), the search probes common
-    /// Node install locations directly, then verifies by running
-    /// `node --version` and `npx --version` (a binary that merely exists but
-    /// is broken — e.g. a dangling symlink — is treated as missing).
+    /// Detect whether `node` and `npx` are both available. Because a GUI
+    /// app's `PATH` is a minimal system default (it misses Homebrew and other
+    /// user paths), the search also probes common Node installation locations
+    /// directly instead of relying on `which` alone.
     static func runtimeAvailable() -> Bool {
-        guard let node = nodePath(), let npx = npxPath() else { return false }
-        return runsVersion(executable: node) && runsVersion(executable: npx)
-    }
-
-    /// Run `<executable> --version` and report whether it exits 0 with output.
-    private static func runsVersion(executable: String) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = ["--version"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return false
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return process.terminationStatus == 0 && !(output?.isEmpty ?? true)
+        nodePath() != nil && npxPath() != nil
     }
 
     /// Common locations of the `node` binary outside the default GUI PATH.
