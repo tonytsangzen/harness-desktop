@@ -1,0 +1,9 @@
+# SwiftPM build artifacts
+.build/
+
+# Build output
+dist/
+*.dmg
+
+# macOS
+.DS_Store
