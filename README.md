@@ -2,6 +2,8 @@
 
 A native macOS wrapper for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) browser UI. It launches `npx @deepseek-ai/dsh web` as a child process and displays the served page in a `WKWebView` window — no compilation of the harness project itself is required.
 
+Licensed under the [MIT License](LICENSE).
+
 | | |
 | --- | --- |
 | Bundle identifier | `com.deepvisus.harness-desktop` |
