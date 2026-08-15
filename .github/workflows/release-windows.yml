@@ -78,7 +78,7 @@ jobs:
           # ends up in the uploaded/released assets.
           & "$PWD/wix/light.exe" -nologo `
             -o "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}.msi" `
-            "-pdbout=DSHWebView-${{ matrix.name }}.wixpdb" `
+            -pdbout "DSHWebView-${{ matrix.name }}.wixpdb" `
             DSHWebView.wixobj
           if ($LASTEXITCODE -ne 0) { throw "light failed" }
 
@@ -86,7 +86,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dsh-windows-${{ matrix.name }}
-          path: staging/*
+          path: |
+            staging/*.exe
+            staging/*.msi
           if-no-files-found: error
 
   publish:
@@ -109,8 +111,9 @@ jobs:
         run: |
           # download-artifact@v4 unpacks each artifact into its own
           # artifacts/<name>/ directory; collect files only (-type f) so those
-          # directories are never passed to gh as upload paths.
-          mapfile -t assets < <(find artifacts -type f -print | sort)
+          # directories are never passed to gh as upload paths, and exclude any
+          # leftover .wixpdb debug-symbol files.
+          mapfile -t assets < <(find artifacts -type f ! -name '*.wixpdb' -print | sort)
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
           else
