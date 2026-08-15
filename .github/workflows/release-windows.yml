@@ -74,8 +74,11 @@ jobs:
             "-dIconPath=$icon" `
             windows/installer/DSHWebView.wxs
           if ($LASTEXITCODE -ne 0) { throw "candle failed" }
+          # Write the WiX debug symbols (.wixpdb) outside staging so it never
+          # ends up in the uploaded/released assets.
           & "$PWD/wix/light.exe" -nologo `
             -o "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}.msi" `
+            "-pdbout=DSHWebView-${{ matrix.name }}.wixpdb" `
             DSHWebView.wixobj
           if ($LASTEXITCODE -ne 0) { throw "light failed" }
 
