@@ -55,7 +55,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force staging | Out-Null
           Copy-Item "windows/build-${{ matrix.name }}/Release/DSHWebView.exe" `
-            "staging/DSHWebView-${{ steps.version.outputs.version }}-${{ matrix.name }}.exe"
+            "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}.exe"
 
       - name: Build MSI installer (WiX v3)
         shell: pwsh
@@ -75,7 +75,7 @@ jobs:
             windows/installer/DSHWebView.wxs
           if ($LASTEXITCODE -ne 0) { throw "candle failed" }
           & "$PWD/wix/light.exe" -nologo `
-            -o "staging/DSHWebView-${{ steps.version.outputs.version }}-${{ matrix.name }}.msi" `
+            -o "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}.msi" `
             DSHWebView.wixobj
           if ($LASTEXITCODE -ne 0) { throw "light failed" }
 
@@ -104,8 +104,10 @@ jobs:
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
-          shopt -s globstar
-          assets=(artifacts/**/*)
+          # download-artifact@v4 unpacks each artifact into its own
+          # artifacts/<name>/ directory; collect files only (-type f) so those
+          # directories are never passed to gh as upload paths.
+          mapfile -t assets < <(find artifacts -type f -print | sort)
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
           else
