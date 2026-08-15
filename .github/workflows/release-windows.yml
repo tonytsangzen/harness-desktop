@@ -65,10 +65,12 @@ jobs:
           Invoke-WebRequest -Uri "$env:WIX_URL" -OutFile wix.zip -UseBasicParsing
           Expand-Archive wix.zip wix
           $exe = (Resolve-Path "windows/build-${{ matrix.name }}/Release/DSHWebView.exe").Path
+          # Quote every -d define as one token so dotted versions (e.g. 1.0.5)
+          # aren't parsed by candle as a trailing source file (CNDL0103).
           & "$PWD/wix/candle.exe" -nologo `
-            -dVersion=${{ steps.version.outputs.version }} `
-            -dPlatform=${{ matrix.msi_platform }} `
-            -dExePath="$exe" `
+            "-dVersion=${{ steps.version.outputs.version }}" `
+            "-dPlatform=${{ matrix.msi_platform }}" `
+            "-dExePath=$exe" `
             windows/installer/DSHWebView.wxs
           if ($LASTEXITCODE -ne 0) { throw "candle failed" }
           & "$PWD/wix/light.exe" -nologo `
