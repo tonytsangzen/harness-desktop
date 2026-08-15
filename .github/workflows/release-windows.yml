@@ -65,12 +65,15 @@ jobs:
           Invoke-WebRequest -Uri "$env:WIX_URL" -OutFile wix.zip -UseBasicParsing
           Expand-Archive wix.zip wix
           $exe = (Resolve-Path "windows/build-${{ matrix.name }}/Release/DSHWebView.exe").Path
+          $icon = (Resolve-Path "AppIcon.ico").Path
           # Quote every -d define as one token so dotted versions (e.g. 1.0.5)
-          # aren't parsed by candle as a trailing source file (CNDL0103).
+          # aren't parsed by candle as a trailing source file (CNDL0103), and
+          # pass the icon as an absolute path so light.exe finds it (LGHT0103).
           & "$PWD/wix/candle.exe" -nologo `
             "-dVersion=${{ steps.version.outputs.version }}" `
             "-dPlatform=${{ matrix.msi_platform }}" `
             "-dExePath=$exe" `
+            "-dIconPath=$icon" `
             windows/installer/DSHWebView.wxs
           if ($LASTEXITCODE -ne 0) { throw "candle failed" }
           & "$PWD/wix/light.exe" -nologo `

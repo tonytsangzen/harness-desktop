@@ -7,6 +7,7 @@
     -dVersion=1.2.3          product version (must be numeric x.y.z)
     -dPlatform=x64|arm64     package platform
     -dExePath=...            path to the built DSHWebView.exe
+    -dIconPath=...           path to AppIcon.ico
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*"
@@ -28,7 +29,7 @@
     <MediaTemplate EmbedCab="yes" />
 
     <!-- Application icon shown in Add/Remove Programs and shortcuts. -->
-    <Icon Id="AppIcon" SourceFile="..\..\AppIcon.ico" />
+    <Icon Id="AppIcon" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="AppIcon" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
