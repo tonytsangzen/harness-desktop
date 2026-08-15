@@ -7,6 +7,19 @@
 
 ## [Unreleased]
 
+### 新增
+
+- Windows 页面内下载支持（对齐 macOS）：注入 JS 拦截 `<a download>` 点击，绕过引擎对程序化下载（无用户手势）的拦截，改为 WinHTTP 原生下载；弹「另存为」对话框选择保存位置（默认 Downloads），底部进度条显示进度，失败弹错误对话框。
+- Windows 应用图标：提交的 `AppIcon.ico` 通过 `resources.rc` 嵌入 exe，并用作窗口类图标（Explorer、任务栏、标题栏）。
+- Windows 双架构发布：GitHub Actions（`release-windows.yml`）产出 **x64 与 arm64** 的便携 exe 与 WiX MSI 安装包（`windows/installer/DSHWebView.wxs`），推送 `v*` 标签自动附加到 Release。
+- README 新增 Windows 最终用户安装说明（MSI / 便携 exe，按 CPU 架构选择）。
+
+### 变更
+
+- Windows 构建按目标架构选择 WebView2 静态加载库（`CMakeLists.txt`）：VS 生成器下以 `CMAKE_GENERATOR_PLATFORM`/`CMAKE_VS_PLATFORM_NAME` 判定 arm64。
+- Windows 页面下载改为先弹保存对话框（原为直接保存到 Downloads 目录）。
+- 新增 `.gitignore`（忽略 `dist/`、`windows/build*/`、WiX 中间产物等）。
+
 ## [1.0.1] - 2026-08-14
 
 ### 修复

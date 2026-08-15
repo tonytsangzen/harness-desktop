@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX v3 installer for the DeepSeek Harness Windows shell.
+  Built by .github/workflows/release-windows.yml for x64 and arm64.
+
+  Preprocessor variables (passed via candle -d...):
+    -dVersion=1.2.3          product version (must be numeric x.y.z)
+    -dPlatform=x64|arm64     package platform
+    -dExePath=...            path to the built DSHWebView.exe
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="DeepSeek Harness"
+           Language="1033"
+           Version="$(var.Version)"
+           Manufacturer="DeepSeek Harness"
+           UpgradeCode="8E2B1A24-6C4F-4B9E-9A71-3D5C8F0E2B17">
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Manufacturer="DeepSeek Harness"
+             Description="DeepSeek Harness desktop shell"
+             Platform="$(var.Platform)" />
+
+    <!-- Upgrade/replace older versions of the same product. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Application icon shown in Add/Remove Programs and shortcuts. -->
+    <Icon Id="AppIcon" SourceFile="..\..\AppIcon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <!-- x64 and arm64 both install into the 64-bit Program Files folder. -->
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="DeepSeek Harness" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="DeepSeek Harness" />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="*">
+        <File Id="DSHWebViewExe"
+              Name="DSHWebView.exe"
+              Source="$(var.ExePath)"
+              KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="StartMenuShortcut" Guid="*">
+        <Shortcut Id="DSHWebViewShortcut"
+                  Directory="ApplicationProgramsFolder"
+                  Name="DeepSeek Harness"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Target="[#DSHWebViewExe]"
+                  Icon="AppIcon" />
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\DeepSeek Harness"
+                       Name="installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="DeepSeek Harness" Level="1">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Product>
+</Wix>

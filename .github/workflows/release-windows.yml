@@ -1,0 +1,105 @@
+# Builds the Windows shell for x64 and arm64 and publishes a portable exe plus
+# a WiX MSI installer for each architecture. Triggers on a v* tag (attaches the
+# four artifacts to the GitHub Release) or on manual dispatch (artifacts only).
+name: release-windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: windows-latest
+    env:
+      WIX_URL: https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x64
+            arch: x64
+            msi_platform: x64
+          - name: arm64
+            arch: ARM64
+            msi_platform: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (VS generator, ${{ matrix.arch }})
+        shell: pwsh
+        run: |
+          cmake -S windows -B windows/build-${{ matrix.name }} `
+            -G "Visual Studio 17 2022" -A ${{ matrix.arch }}
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build windows/build-${{ matrix.name }} --config Release
+
+      - name: Resolve version (from tag or default)
+        id: version
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME
+          if ($v -like 'v*') { $v = $v.Substring(1) }
+          if (-not $v) { $v = '1.0.0' }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$v"
+
+      - name: Stage portable exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force staging | Out-Null
+          Copy-Item "windows/build-${{ matrix.name }}/Release/DSHWebView.exe" `
+            "staging/DSHWebView-${{ steps.version.outputs.version }}-${{ matrix.name }}.exe"
+
+      - name: Build MSI installer (WiX v3)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "$env:WIX_URL" -OutFile wix.zip -UseBasicParsing
+          Expand-Archive wix.zip wix
+          $exe = (Resolve-Path "windows/build-${{ matrix.name }}/Release/DSHWebView.exe").Path
+          & "$PWD/wix/candle.exe" -nologo `
+            -dVersion=${{ steps.version.outputs.version }} `
+            -dPlatform=${{ matrix.msi_platform }} `
+            -dExePath="$exe" `
+            windows/installer/DSHWebView.wxs
+          if ($LASTEXITCODE -ne 0) { throw "candle failed" }
+          & "$PWD/wix/light.exe" -nologo `
+            -o "staging/DSHWebView-${{ steps.version.outputs.version }}-${{ matrix.name }}.msi" `
+            DSHWebView.wixobj
+          if ($LASTEXITCODE -ne 0) { throw "light failed" }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-windows-${{ matrix.name }}
+          path: staging/*
+          if-no-files-found: error
+
+  publish:
+    name: Attach assets to release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Attach exe + msi to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          shopt -s globstar
+          assets=(artifacts/**/*)
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --generate-notes
+          fi

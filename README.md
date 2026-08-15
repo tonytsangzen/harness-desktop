@@ -1,8 +1,19 @@
 # DeepSeek Harness Desktop
 
-A native macOS wrapper for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) browser UI. It launches `npx @deepseek-ai/dsh web` as a child process and displays the served page in a `WKWebView` window — no compilation of the harness project itself is required.
+Native desktop shells for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) browser UI. Each shell launches `npx @deepseek-ai/dsh web` as a child process and displays the served page in the operating system's built-in webview — **no Electron, no bundled Chromium/Node**, and no compilation of the harness project itself.
+
+Currently supported platforms:
+
+| Platform | Shell | Webview |
+| --- | --- | --- |
+| macOS | Swift (`WKWebView`) | WebKit |
+| Windows | Native C++ (Win32 + WebView2 COM) | WebView2 (system) |
+
+Both shells follow the same behavior contract and are developed separately (their only shared ground is the launch command, port selection, update check, and mirror-based runtime download — each implemented natively per platform).
 
 Licensed under the [MIT License](LICENSE).
+
+### macOS
 
 | | |
 | --- | --- |
@@ -10,6 +21,17 @@ Licensed under the [MIT License](LICENSE).
 | Display name | DeepSeek Harness |
 | Executable | `DSHWebView` |
 | Minimum macOS | 13.0 |
+
+### Windows
+
+| | |
+| --- | --- |
+| Display name | DeepSeek Harness |
+| Executable | `DSHWebView.exe` |
+| Architectures | x64, arm64 (Windows on ARM) |
+| Target | Windows 10 1809+ |
+| Runtime | Native C++ (MSVC, statically linked) — single ~0.5 MB exe |
+| Installers | portable exe + WiX MSI, per architecture |
 
 ## Install (end users)
 
@@ -41,9 +63,26 @@ The app spawns `npx @deepseek-ai/dsh web` at runtime, so it needs Node.js. It
 No Node.js, Homebrew, or other tooling needs to be pre-installed on a clean
 macOS machine.
 
-## Requirements (building from source)
+### Windows
 
-- macOS 13+ (arm64)
+Download the latest release from GitHub Releases and pick the file matching your
+CPU architecture (`x64` for Intel/AMD 64-bit, `arm64` for ARM-based devices):
+
+- **MSI installer** — `DSHWebView-<version>-x64.msi` (or `-arm64.msi`).
+  Double-click to install into `Program Files\DeepSeek Harness` with a Start
+  Menu shortcut and an uninstall entry, or install silently:
+
+  ```sh
+  msiexec /i DSHWebView-<version>-x64.msi /qn
+  ```
+
+- **Portable exe** — `DSHWebView-<version>-x64.exe` (or `-arm64.exe`). No
+  installation required; run it directly. WebView2 Evergreen Runtime is the only
+  dependency (preinstalled on Windows 11 and with Edge).
+
+## Requirements (building macOS shell)
+
+- macOS 13+ (Universal — arm64 + x86_64)
 - Xcode command-line tools (`swift`, `swift build`)
 - Node.js 22+ and npm/npx (for `@deepseek-ai/dsh`)
 
@@ -65,15 +104,18 @@ This installs (and is safe to re-run; each step skips when already satisfied):
 
 Note: the `xcode-select --install` step pops a GUI dialog; click **Install**, accept the license, wait for the download to finish, then re-run the script.
 
-## Build
+## Build (macOS)
 
 ```sh
 ./build-app.sh
 ```
 
-This compiles the Swift release binary and assembles `dist/DeepSeek Harness.app`, copying the committed `AppIcon.icns` into the bundle.
+This compiles the Swift release binary for both `arm64` and `x86_64`, merges
+them into a universal binary with `lipo`, and assembles `dist/DeepSeek Harness.app`
+(single bundle runs on Apple Silicon and Intel), copying the committed
+`AppIcon.icns` into the bundle.
 
-## Run
+## Run (macOS)
 
 ```sh
 open "dist/DeepSeek Harness.app"
@@ -129,12 +171,110 @@ Environment overrides (lower priority than CLI flags):
 
 This produces `dist/DeepSeek Harness-<version>.dmg` (default version `1.0.0`, overridable via the `VERSION` environment variable). The DMG contains the app plus an `/Applications` symlink for drag-to-install.
 
+## Windows (build & behavior)
+
+The Windows shell lives in [`windows/`](windows/) and is a **native C++ (Win32)
+app that hosts WebView2 through the raw COM API** — no C#/.NET, no WinUI, no
+WebView2Loader DLL (the static loader is linked in). It reproduces the macOS
+shell's behavior:
+
+1. Detects and provisions Node.js (downloads the official Windows `.zip`,
+   extracts to `%LOCALAPPDATA%\Programs\nodejs`, and appends it to the user PATH —
+   no administrator rights needed).
+2. Spawns `npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080` without a
+   console window; stdout/stderr are captured to `%TEMP%\DSHWebView-dsh.log`.
+3. Polls the server until it accepts connections, then loads the served page in
+   the WebView2 window. A loading overlay reports runtime provisioning progress.
+   Downloads initiated from the page (including programmatic `<a download>`
+   clicks outside a user gesture, e.g. the Session ZIP export — mirrored from
+   the macOS shell via an in-page interceptor plus a native WinHTTP download)
+   show a **Save As dialog** for the destination (defaulting to the user's
+   Downloads folder, matching the macOS save panel), are tracked in a bottom
+   progress bar, and surface an error dialog on failure.
+4. Terminates the whole child process tree on window close (Job Object).
+5. Checks for `@deepseek-ai/dsh` updates against the npm registry on launch and
+   offers to refresh the npx cache.
+
+### Build (Windows)
+
+Requires Visual Studio 2022 with the Desktop C++ workload (MSVC, CMake, Ninja).
+From a Windows machine or the `windows-latest` GitHub runner:
+
+```sh
+./scripts/build-windows.sh
+```
+
+This produces a single portable exe at `dist/windows/DSHWebView.exe` (no MSIX, no
+installed runtimes). The committed `AppIcon.ico` is embedded as the application
+icon (Explorer, taskbar, and window title bar). Open `dist/windows/DSHWebView.exe`
+to run it.
+
+The [release workflow](.github/workflows/release-windows.yml) builds the shell
+for **both x64 and arm64** (Visual Studio generator, `-A x64` / `-A ARM64`) and
+publishes, per architecture, a portable exe plus a WiX MSI installer
+(`windows/installer/DSHWebView.wxs`) — `DSHWebView-<version>-<arch>.exe` /
+`.msi` — installing the exe to `Program Files\DeepSeek Harness` with a Start
+Menu shortcut and an uninstall entry.
+
+### Runtime provisioning (Windows)
+
+On first launch, when `node`/`npx` are missing:
+
+1. Resolves the latest LTS `node-<version>-win-<arch>.zip` from nodejs.org
+   (mirrored to npmmirror for China timezones).
+2. Extracts it to `%LOCALAPPDATA%\Programs\nodejs`.
+3. Updates the current process `PATH` and persists the new dir to the user
+   environment (`HKCU\Environment\Path`).
+
+The only runtime dependency is the **Microsoft Edge WebView2 Evergreen Runtime**
+(preinstalled on Windows 11 and with Edge, or available via the standard
+WebView2 installer). No elevation or other tooling is required on a clean
+Windows machine.
+
 ## Release
 
-The [release workflow](.github/workflows/release.yml) builds the app, packages a DMG, and publishes it:
+The macOS shell publishes a DMG via the [release workflow](.github/workflows/release.yml);
+the Windows shell publishes, for **x64 and arm64**, a portable exe plus a WiX MSI
+installer via [release-windows.yml](.github/workflows/release-windows.yml). Both
+trigger on a `v*` tag (or manual dispatch) and attach to the same GitHub Release.
 
-- Pushing a `v*` tag (e.g. `v1.0.0`) triggers a run that attaches the DMG to the generated GitHub Release with release notes.
-- Manual runs are available via the **Actions → Release → Run workflow** button, which uploads the DMG as a build artifact.
+## Project layout
+
+```
+.
+├── install.sh                End-user installer: downloads DMG, installs, launches
+├── build-app.sh              macOS build script (Swift)
+├── Package.swift             SwiftPM manifest (macOS executable target DSHWebView)
+├── macos/                    macOS shell (native Swift / WKWebView)
+│   └── DSHWebView/
+│       └── main.swift        App entry point, server manager, webview window
+├── windows/                  Windows shell (native C++ / Win32 / WebView2 COM)
+│   ├── CMakeLists.txt        CMake build (downloads WebView2 SDK, static CRT; x64/arm64 loader)
+│   ├── app.manifest          Embedded manifest (asInvoker, PerMonitorV2)
+│   ├── resources.rc          Embeds app.manifest (RT_MANIFEST) + AppIcon.ico
+│   ├── installer/
+│   │   └── DSHWebView.wxs    WiX v3 source for the MSI installer (x64/arm64)
+│   └── src/
+│       ├── main.cpp          wWinMain: settings, window, message loop
+│       ├── main_window.cpp   Win32 window, WebView2 COM wiring, overlay/download bar
+│       ├── settings.cpp      CLI/env parsing (mirrors macOS)
+│       ├── server_manager.cpp  spawn dsh web, port probe, Job Object child mgmt
+│       ├── node_runtime_manager.cpp  Node detection + zip install + PATH
+│       ├── dsh_update_manager.cpp    npm registry version check / npx refresh
+│       ├── http.cpp          WinHTTP GET (string / to-file with progress)
+│       └── json.cpp          Minimal JSON parser (npm/node metadata)
+├── Info.plist                macOS bundle configuration
+├── AppIcon.icns              macOS application icon (committed)
+├── AppIcon.ico               Windows application icon (committed, embedded via `windows/resources.rc`)
+├── CHANGELOG.md              Release notes (Keep a Changelog)
+├── .github/workflows/
+│   ├── release.yml           CI: macOS build, DMG, release
+│   ├── release-windows.yml   CI: x64+arm64 exe & MSI, release
+└── scripts/
+    ├── setup.sh               macOS one-shot toolchain installer
+    ├── create-dmg.sh          macOS DMG packaging
+    └── build-windows.sh       Windows build (run on Windows)
+```
 
 ## Signing & notarization
 
@@ -163,22 +303,3 @@ Notes:
 - Installing Node.js via `/usr/sbin/installer` requires elevated privileges, so
   the system will prompt for authorization the first time it provisions the
   runtime.
-
-## Project layout
-
-```
-.
-├── install.sh                End-user installer: downloads DMG, installs, launches
-├── build-app.sh              Build script: compiles and assembles the .app
-├── Package.swift             SwiftPM manifest (executable target DSHWebView)
-├── Info.plist                Bundle configuration (identifier, icon, metadata)
-├── AppIcon.icns              Application icon (committed)
-├── CHANGELOG.md              Release notes (Keep a Changelog)
-├── .github/workflows/
-│   └── release.yml           CI: build, package DMG, and publish releases
-├── scripts/
-│   ├── setup.sh               One-shot toolchain installer for clean macOS
-│   └── create-dmg.sh          DMG packaging script
-└── Sources/DSHWebView/
-    └── main.swift            Application entry point, server manager, webview window
-```

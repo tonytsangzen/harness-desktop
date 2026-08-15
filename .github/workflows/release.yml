@@ -36,10 +36,19 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${VERSION}"
 
-      - name: Build app bundle
+      - name: Build app bundle (universal arm64 + x86_64)
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: bash build-app.sh
+
+      - name: Verify universal binary
+        run: |
+          lipo -info "dist/DeepSeek Harness.app/Contents/MacOS/DSHWebView"
+          # Fail fast if either architecture is missing.
+          lipo -info "dist/DeepSeek Harness.app/Contents/MacOS/DSHWebView" \
+            | grep -q "arm64" && echo "arm64 OK"
+          lipo -info "dist/DeepSeek Harness.app/Contents/MacOS/DSHWebView" \
+            | grep -q "x86_64" && echo "x86_64 OK"
 
       - name: Create DMG
         env:

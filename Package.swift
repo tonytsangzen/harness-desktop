@@ -9,7 +9,7 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "DSHWebView",
-            path: "Sources/DSHWebView"
+            path: "macos/DSHWebView"
         )
     ]
 )
