@@ -26,10 +26,8 @@ jobs:
         include:
           - name: x64
             arch: x64
-            msi_platform: x64
           - name: arm64
             arch: ARM64
-            msi_platform: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -71,7 +69,7 @@ jobs:
           # pass the icon as an absolute path so light.exe finds it (LGHT0103).
           & "$PWD/wix/candle.exe" -nologo `
             "-dVersion=${{ steps.version.outputs.version }}" `
-            "-dPlatform=${{ matrix.msi_platform }}" `
+            "-dPlatform=x64" `
             "-dExePath=$exe" `
             "-dIconPath=$icon" `
             windows/installer/DSHWebView.wxs

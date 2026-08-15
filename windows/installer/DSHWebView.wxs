@@ -5,7 +5,8 @@
 
   Preprocessor variables (passed via candle -d...):
     -dVersion=1.2.3          product version (must be numeric x.y.z)
-    -dPlatform=x64|arm64     package platform
+    -dPlatform=x64           package platform (always x64; arm64 payloads ship
+                             in an x64 MSI as there is no separate arm64 MSI)
     -dExePath=...            path to the built DSHWebView.exe
     -dIconPath=...           path to AppIcon.ico
 -->
@@ -43,7 +44,7 @@
     </Directory>
 
     <DirectoryRef Id="INSTALLFOLDER">
-      <Component Id="MainExecutable" Guid="*">
+      <Component Id="MainExecutable" Guid="*" Win64="yes">
         <File Id="DSHWebViewExe"
               Name="DSHWebView.exe"
               Source="$(var.ExePath)"
@@ -58,6 +59,7 @@
                   Name="DeepSeek Harness"
                   WorkingDirectory="INSTALLFOLDER"
                   Target="[#DSHWebViewExe]"
+                  Advertise="no"
                   Icon="AppIcon" />
         <RemoveFolder Id="RemoveApplicationProgramsFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
         <RegistryValue Root="HKCU"
