@@ -15,7 +15,9 @@ permissions:
 jobs:
   build:
     name: Build ${{ matrix.name }}
-    runs-on: windows-latest
+    # windows-latest (Server 2025) no longer ships Visual Studio 2022; pin to
+    # windows-2022, which includes the VS2022 x64 + ARM64 MSVC toolsets.
+    runs-on: windows-2022
     env:
       WIX_URL: https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip
     strategy:
