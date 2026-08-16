@@ -24,6 +24,9 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 # Let pkg_check_modules resolve the arm64 .pc files and prefix their paths
-# with the sysroot, regardless of the caller's environment.
-set(ENV{PKG_CONFIG_LIBDIR} "/usr/lib/aarch64-linux-gnu/pkgconfig")
+# with the sysroot, regardless of the caller's environment. PKG_CONFIG_LIBDIR
+# must include /usr/share/pkgconfig too: arch-independent .pc files (e.g.
+# xproto.pc from x11proto-core-dev) live there, and --exists walks the whole
+# dependency tree — without them the lookup fails with "Package not found".
+set(ENV{PKG_CONFIG_LIBDIR} "/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig")
 set(ENV{PKG_CONFIG_SYSROOT_DIR} "/usr/aarch64-linux-gnu")
