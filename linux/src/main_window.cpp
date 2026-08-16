@@ -159,6 +159,12 @@ gboolean OnNodeInstallProgressIdle(gpointer data) {
 gboolean OnNodeInstallDoneIdle(gpointer data) {
     auto* ctx = static_cast<NodeInstallCtx*>(data);
     if (ctx->dialog) {
+        // Detach the weak pointer first: gtk_widget_destroy() in
+        // StartNodeAutoInstall runs *after* this idle and would otherwise
+        // write NULL into the already-freed ctx (heap use-after-free that
+        // corrupted GLib's allocator and crashed the following Start()).
+        g_object_remove_weak_pointer(G_OBJECT(ctx->dialog),
+                                     reinterpret_cast<gpointer*>(&ctx->dialog));
         gtk_dialog_response(GTK_DIALOG(ctx->dialog),
                             ctx->result ? GTK_RESPONSE_OK : GTK_RESPONSE_REJECT);
     }
@@ -269,8 +275,15 @@ void MainWindow::BuildUi() {
     g_signal_connect(webview_, "create", G_CALLBACK(OnCreateWebView), this);
     g_signal_connect(webview_, "load-changed", G_CALLBACK(OnLoadChanged), this);
     g_signal_connect(webview_, "load-failed", G_CALLBACK(OnLoadFailed), this);
-    g_signal_connect(webkit_web_context_get_default(), "download-start",
-                     G_CALLBACK(OnDownloadStart), this);
+    // Newer WebKitGTK renamed the WebKitWebContext download signal to
+    // "download-started"; probe so both the 2.36 baseline and current
+    // releases work (a failed connect only warns and silently disables
+    // page downloads).
+    WebKitWebContext* webContext = webkit_web_context_get_default();
+    const char* downloadSignal = g_signal_lookup("download-start", WEBKIT_TYPE_WEB_CONTEXT)
+                                     ? "download-start"
+                                     : "download-started";
+    g_signal_connect(webContext, downloadSignal, G_CALLBACK(OnDownloadStart), this);
 
     // Loading overlay (spinner while the server / first page comes up).
     GtkWidget* overlay = gtk_overlay_new();
@@ -285,6 +298,12 @@ void MainWindow::BuildUi() {
     GtkWidget* label = gtk_label_new(IsChinese() ? "正在启动 DeepSeek Harness…" : "Starting DeepSeek Harness…");
     gtk_box_pack_start(GTK_BOX(loadingOverlay_), spinner, FALSE, FALSE, 0);
     gtk_box_pack_start(GTK_BOX(loadingOverlay_), label, FALSE, FALSE, 0);
+    // Hint shown only when startup drags on (first run installs the dsh
+    // dependency tree through npx, which can take several minutes).
+    loadingHint_ = gtk_label_new("");
+    gtk_style_context_add_class(gtk_widget_get_style_context(loadingHint_), "dim-label");
+    gtk_box_pack_start(GTK_BOX(loadingOverlay_), loadingHint_, FALSE, FALSE, 0);
+    gtk_widget_set_no_show_all(loadingHint_, TRUE);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), loadingOverlay_);
 
     // Download progress bar (hidden until a download starts).
@@ -526,22 +545,31 @@ void MainWindow::StartServerAndPoll() {
 gboolean MainWindow::OnPollServer(gpointer userData) {
     auto* self = static_cast<MainWindow*>(userData);
     if (self->serverReady_) return G_SOURCE_REMOVE;
-    // First run installs @deepseek-ai/dsh's large dependency tree through npx
-    // and can take several minutes. As long as the child is still alive we
-    // keep polling (the 180 s cap would fail a healthy first launch); a dead
-    // child fails fast. A generous hard cap guards against a hung npx.
+    // First run installs @deepseek-ai/dsh's dependency tree through npx. The
+    // child stays alive while installing, but a 3-minute cap keeps a hung npx
+    // from blocking forever; the loading overlay hints what is going on.
     if (!ServerManager::IsRunning()) {
         self->OnServerFailed();
         return G_SOURCE_REMOVE;
     }
     const gint64 elapsedUs = g_get_monotonic_time() - self->pollStartedUs_;
-    if (elapsedUs > 900 * G_USEC_PER_SEC) {
+    if (elapsedUs > 180 * G_USEC_PER_SEC) {
         self->OnServerFailed();
         return G_SOURCE_REMOVE;
     }
     if (ServerManager::TcpProbe(self->settings_->host, ServerManager::ActivePort(), 300)) {
         self->OnServerReady();
         return G_SOURCE_REMOVE;
+    }
+    // After 30 seconds of waiting, tell the user what is going on: the first
+    // launch installs @deepseek-ai/dsh through npx and can take a while.
+    if (elapsedUs > 30 * G_USEC_PER_SEC && self->loadingHint_ &&
+        !gtk_widget_get_visible(self->loadingHint_)) {
+        gtk_label_set_text(GTK_LABEL(self->loadingHint_),
+                           self->IsChinese()
+                               ? "首次启动正在下载依赖，可能需要几分钟…"
+                               : "First launch is downloading dependencies — this can take a few minutes…");
+        gtk_widget_show(self->loadingHint_);
     }
     return G_SOURCE_CONTINUE;
 }
@@ -602,6 +630,9 @@ void MainWindow::StartNodeAutoInstall() {
 
     if (response == GTK_RESPONSE_OK) {
         // The runtime is installed and on PATH now — start the server again.
+        // OnServerFailed() hid the loading overlay; bring it back so the
+        // window shows progress instead of a blank webview while npx spins up.
+        SetLoadingOverlay(true);
         NodeRuntimeManager::EnsureOnPath();
         ServerManager::Start();
         serverReady_ = false;

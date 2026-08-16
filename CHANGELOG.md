@@ -14,7 +14,11 @@
 
 ### 修复
 
-- Linux 首次启动卡在加载画面：npx 首次安装 `@deepseek-ai/dsh` 时交互式询问 "Ok to proceed?" 导致挂起（现设置 `npm_config_yes=true` 并把子进程 stdin 重定向到 `/dev/null`）；且该包依赖树巨大，首次安装实测约 8 分钟，启动轮询由固定 180s 超时改为**子进程存活期间持续等待**（15 分钟硬上限兜底），子进程退出才立即报错——避免健康的首次安装被误判为失败。
+- Linux 首次启动卡在加载画面：npx 首次安装 `@deepseek-ai/dsh` 时交互式询问 "Ok to proceed?" 导致挂起（现设置 `npm_config_yes=true` 并把子进程 stdin 重定向到 `/dev/null`）；启动轮询 3 分钟兜底，加载画面 30 秒后提示「首次启动正在下载依赖」。
+- Linux 中国时区镜像判定：`/etc/timezone`（Debian 遗留文件）可能过期残留（实测一台 Asia/Shanghai 时区的机器上该文件为 `US/Pacific`），导致误判非中国时区、未走 npmmirror 镜像，npm 下载慢 10-20 倍。现改为以 `/etc/localtime`（符号链接、systemd/timedatectl 维护）为权威来源，`/etc/timezone` 仅作后备。
+- Linux 自动安装 Node.js 完成后段错误：安装对话框销毁时 weak pointer 回调写入已释放的上下文（heap use-after-free，损坏 GLib 分配器后在下一次启动服务的 `g_child_watch_add` 处崩溃）。现于完成回调中先移除 weak pointer 再释放上下文。
+- Linux 自动安装 Node.js 完成后 webview 空白：加载遮罩在失败路径被隐藏后未重新显示，现于重启服务前恢复显示。
+- Linux 页面下载失效警告：新版 WebKitGTK 将 WebKitWebContext 的下载信号由 `download-start` 更名为 `download-started`，现于运行时探测兼容 2.36 基线及新版。
 
 ## [1.0.8] - 2026-08-16
 

@@ -38,27 +38,27 @@ void RemoveTree(const std::string& path) {
 }
 
 // True for the UTC+8 China timezone (matches the Windows shell's heuristic).
+// /etc/localtime is the authoritative system timezone (a symlink into
+// zoneinfo, kept in sync by systemd/timedatectl); /etc/timezone is a legacy
+// Debian file that can be stale (observed "US/Pacific" on a machine whose
+// real timezone was Asia/Shanghai), so it is only a fallback.
 bool IsMainlandChina() {
+    auto isChina = [](const std::string& s) {
+        return s.find("Asia/Shanghai") != std::string::npos ||
+               s.find("Asia/Chongqing") != std::string::npos ||
+               s.find("Asia/Urumqi") != std::string::npos;
+    };
     std::string tz = GetEnv("TZ");
-    if (!tz.empty()) {
-        return tz.find("Asia/Shanghai") != std::string::npos ||
-               tz.find("Asia/Chongqing") != std::string::npos ||
-               tz.find("Asia/Urumqi") != std::string::npos;
-    }
-    std::string tzfile = ReadFileText("/etc/timezone");
-    while (!tzfile.empty() && (tzfile.back() == '\n' || tzfile.back() == '\r')) tzfile.pop_back();
-    if (!tzfile.empty()) {
-        return tzfile == "Asia/Shanghai" || tzfile == "Asia/Chongqing" ||
-               tzfile == "Asia/Urumqi";
-    }
+    if (!tz.empty()) return isChina(tz); // explicit TZ wins (may also be unset)
     char buf[PATH_MAX];
     ssize_t n = readlink("/etc/localtime", buf, sizeof(buf) - 1);
     if (n > 0) {
         buf[n] = '\0';
-        std::string p(buf);
-        return p.find("Asia/Shanghai") != std::string::npos;
+        return isChina(std::string(buf));
     }
-    return false;
+    std::string tzfile = ReadFileText("/etc/timezone");
+    while (!tzfile.empty() && (tzfile.back() == '\n' || tzfile.back() == '\r')) tzfile.pop_back();
+    return !tzfile.empty() && isChina(tzfile);
 }
 
 std::string DistBase() {

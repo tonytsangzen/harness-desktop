@@ -35,6 +35,7 @@ private:
     GtkWidget* webview_ = nullptr;
     WebKitSettings* webSettings_ = nullptr;
     GtkWidget* loadingOverlay_ = nullptr;
+    GtkWidget* loadingHint_ = nullptr;
     GtkWidget* progressBox_ = nullptr;
     GtkWidget* progressLabel_ = nullptr;
     GtkWidget* progressBar_ = nullptr;
