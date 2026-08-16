@@ -129,8 +129,14 @@ bool Start() {
     if (pid == 0) {
         // Child: own process group + stdio → log files.
         setpgid(0, 0);
-        // Point npm at the right registry (China mirror) before npx runs.
+        // Point npm at the right registry (China mirror) and never prompt for
+        // confirmation — npx would otherwise block forever on its interactive
+        // "Ok to proceed? (y)" (mirrors the Windows shell's npm_config_yes).
         setenv("npm_config_registry", NodeRuntimeManager::NpmRegistryUrl().c_str(), 1);
+        setenv("npm_config_yes", "true", 1);
+        // Ensure no child ever blocks reading a terminal (GUI apps have none).
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
         int out = open(logPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         int err = open(logErr.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (out >= 0) { dup2(out, STDOUT_FILENO); close(out); }

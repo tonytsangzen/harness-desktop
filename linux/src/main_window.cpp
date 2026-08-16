@@ -526,8 +526,16 @@ void MainWindow::StartServerAndPoll() {
 gboolean MainWindow::OnPollServer(gpointer userData) {
     auto* self = static_cast<MainWindow*>(userData);
     if (self->serverReady_) return G_SOURCE_REMOVE;
+    // First run installs @deepseek-ai/dsh's large dependency tree through npx
+    // and can take several minutes. As long as the child is still alive we
+    // keep polling (the 180 s cap would fail a healthy first launch); a dead
+    // child fails fast. A generous hard cap guards against a hung npx.
+    if (!ServerManager::IsRunning()) {
+        self->OnServerFailed();
+        return G_SOURCE_REMOVE;
+    }
     const gint64 elapsedUs = g_get_monotonic_time() - self->pollStartedUs_;
-    if (elapsedUs > 180 * G_USEC_PER_SEC) {
+    if (elapsedUs > 900 * G_USEC_PER_SEC) {
         self->OnServerFailed();
         return G_SOURCE_REMOVE;
     }

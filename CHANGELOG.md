@@ -12,6 +12,10 @@
 - Linux 自动安装 Node.js：首次启动缺少 node/npx 时自动下载安装最新 LTS 到 `~/.local/share/deepseek-harness/nodejs`（用户级、无需 root，与 macOS/Windows 一致），带进度对话框，装完自动启动服务；仅自动安装失败时才提示手动安装（`sudo apt install nodejs npm`）。中国时区自动使用 npmmirror 镜像（node 下载与 npm registry）。
 - 三个平台发布工作流合并为单个 `release.yml`：macOS DMG、Windows x64/arm64 exe+MSI、Linux x86_64/arm64 tarball+.deb，一个 `publish` job 统一附加到 Release。
 
+### 修复
+
+- Linux 首次启动卡在加载画面：npx 首次安装 `@deepseek-ai/dsh` 时交互式询问 "Ok to proceed?" 导致挂起（现设置 `npm_config_yes=true` 并把子进程 stdin 重定向到 `/dev/null`）；且该包依赖树巨大，首次安装实测约 8 分钟，启动轮询由固定 180s 超时改为**子进程存活期间持续等待**（15 分钟硬上限兜底），子进程退出才立即报错——避免健康的首次安装被误判为失败。
+
 ## [1.0.8] - 2026-08-16
 
 ### 新增
