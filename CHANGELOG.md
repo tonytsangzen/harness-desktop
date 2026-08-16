@@ -9,9 +9,9 @@
 
 ### 新增
 
-- **Linux 移植**：新增 `linux/` 原生壳（C++ + GTK3 + WebKitGTK 4.1，系统 WebView），功能与 macOS/Windows 对齐 —— 主题（跟随系统/明亮/暗黑）、菜单多语言（跟随系统/简体中文/English，持久化到 `~/.config/deepseek-harness/settings.conf`）、全屏、编辑快捷键、外部链接走系统默认浏览器、下载另存为 + 进度条、npm 版本检查、插件市场。新增 `.github/workflows/release-linux.yml`，随 `v*` tag 发布 **x86_64 与 arm64** 双架构的便携 tarball + `.deb` 包。
+- **Linux 移植**：新增 `linux/` 原生壳（C++ + GTK3 + WebKitGTK 4.1，系统 WebView），功能与 macOS/Windows 对齐 —— 主题（跟随系统/明亮/暗黑）、菜单多语言（跟随系统/简体中文/English，持久化到 `~/.config/deepseek-harness/settings.conf`）、全屏、编辑快捷键、外部链接走系统默认浏览器、下载另存为 + 进度条、npm 版本检查、插件市场。新增 `.github/workflows/release-linux.yml`，随 `v*` tag 发布 **x86_64 与 arm64** 双架构的便携 tarball + `.deb` 包（arm64 在 ubuntu-22.04 交叉编译，与 x64 同为 glibc 2.35 基线）。
 - Linux 窗口/任务栏图标：新增 256px PNG 图标，运行时从可执行文件同目录（便携包）或 hicolor 图标主题（`.deb` 安装）加载，替代原来的通用占位图标。
-- Linux arm64 产物改为在 ubuntu-22.04 上交叉编译（aarch64 工具链 + arm64 multiarch 依赖），与 x64 同为 glibc 2.35 基线，可在 Ubuntu 22.04+ / Debian 12+ 上直接运行（原先用 ubuntu-24.04-arm 原生编译，产物要求 GLIBC 2.38+，老系统无法运行）。
+- 三个平台发布工作流合并为单个 `release.yml`：macOS DMG、Windows x64/arm64 exe+MSI、Linux x86_64/arm64 tarball+.deb，一个 `publish` job 统一附加到 Release。
 - 全屏模式菜单项（macOS + Windows）：macOS 视图菜单新增「进入/退出全屏」（⌃⌘F，标题随窗口状态切换）；Windows 菜单栏新增「全屏」开关（无边框铺满显示器，可勾选）。
 
 ### 修复

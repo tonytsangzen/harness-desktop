@@ -260,7 +260,7 @@ installed runtimes). The committed `AppIcon.ico` is embedded as the application
 icon (Explorer, taskbar, and window title bar). Open `dist/windows/DSHWebView.exe`
 to run it.
 
-The [release workflow](.github/workflows/release-windows.yml) builds the shell
+The [release workflow](.github/workflows/release.yml) builds the shell
 for **both x64 and arm64** (Visual Studio generator, `-A x64` / `-A ARM64`) and
 publishes, per architecture, a portable exe plus a WiX MSI installer
 (`windows/installer/DSHWebView.wxs`) — `DSHWebView-<version>-<arch>.exe` /
@@ -330,7 +330,7 @@ cmake --build linux/build
 ./linux/build/dshwebview
 ```
 
-The [release workflow](.github/workflows/release-linux.yml) builds **x86_64**
+The [release workflow](.github/workflows/release.yml) builds **x86_64**
 natively and **arm64** cross-compiled (aarch64 toolchain), both on
 ubuntu-22.04 so the artifacts share the same glibc baseline and run on
 Ubuntu 22.04+ / Debian 12+. It publishes, per architecture, a portable
@@ -340,12 +340,15 @@ tarball plus a `.deb` package (`deepseek-harness_<version>_amd64.deb` /
 
 ## Release
 
-The macOS shell publishes a DMG via the [release workflow](.github/workflows/release.yml);
-the Windows shell publishes, for **x64 and arm64**, a portable exe plus a WiX MSI
-installer via [release-windows.yml](.github/workflows/release-windows.yml); the
-Linux shell publishes a portable tarball plus a `.deb` package via
-[release-linux.yml](.github/workflows/release-linux.yml). All three trigger on a
-`v*` tag (or manual dispatch) and attach to the same GitHub Release.
+A single [release workflow](.github/workflows/release.yml) builds all three
+platforms and attaches everything to one GitHub Release:
+- macOS: universal (arm64 + x86_64) DMG, built on macos-14;
+- Windows: portable exe + WiX MSI for **x64 and arm64**, built on windows-2022;
+- Linux: portable tarball + `.deb` for **x86_64 and arm64** (arm64
+  cross-compiled), built on ubuntu-22.04.
+
+All jobs run on a `v*` tag (or manual dispatch); a single `publish` job
+collects every artifact and attaches it to the Release.
 
 ## Project layout
 
@@ -390,9 +393,7 @@ Linux shell publishes a portable tarball plus a `.deb` package via
 ├── AppIcon.ico               Windows application icon (committed, embedded via `windows/resources.rc`)
 ├── CHANGELOG.md              Release notes (Keep a Changelog)
 ├── .github/workflows/
-│   ├── release.yml           CI: macOS build, DMG, release
-│   ├── release-windows.yml   CI: x64+arm64 exe & MSI, release
-│   └── release-linux.yml     CI: Linux tarball & .deb, release
+│   └── release.yml           CI: macOS DMG, Windows exe+MSI, Linux tarball+.deb, release
 └── scripts/
     ├── setup.sh               macOS one-shot toolchain installer
     ├── create-dmg.sh          macOS DMG packaging

@@ -1,3 +1,11 @@
+# Builds the DeepSeek Harness desktop shells for all three platforms and
+# attaches every artifact to the GitHub Release:
+#   - macOS: universal (arm64 + x86_64) DMG on macos-14
+#   - Windows: x64 + arm64 portable exe + WiX MSI on windows-2022
+#   - Linux: x86_64 native + arm64 cross-compiled (ubuntu-22.04, glibc 2.35
+#     baseline) portable tarball + .deb
+# Triggers on a v* tag (attaches all assets to the Release) or on manual
+# dispatch (artifacts only).
 name: Release
 
 on:
@@ -10,8 +18,8 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build and package DMG
+  macos:
+    name: Build macOS DMG (universal)
     runs-on: macos-14
 
     steps:
@@ -62,9 +70,235 @@ jobs:
           path: dist/*.dmg
           if-no-files-found: error
 
-      - name: Attach DMG to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+  windows:
+    name: Build Windows (${{ matrix.name }})
+    # windows-latest (Server 2025) no longer ships Visual Studio 2022; pin to
+    # windows-2022, which includes the VS2022 x64 + ARM64 MSVC toolsets.
+    runs-on: windows-2022
+    env:
+      WIX_URL: https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x64
+            arch: x64
+          - name: arm64
+            arch: ARM64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (VS generator, ${{ matrix.arch }})
+        shell: pwsh
+        run: |
+          cmake -S windows -B windows/build-${{ matrix.name }} `
+            -G "Visual Studio 17 2022" -A ${{ matrix.arch }}
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build windows/build-${{ matrix.name }} --config Release
+
+      - name: Resolve version (from tag or default)
+        id: version
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME
+          if ($v -like 'v*') { $v = $v.Substring(1) }
+          if (-not $v) { $v = '1.0.0' }
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$v"
+
+      - name: Stage portable exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force staging | Out-Null
+          Copy-Item "windows/build-${{ matrix.name }}/Release/DSHWebView.exe" `
+            "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}.exe"
+
+      - name: Build MSI installer (WiX v3)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "$env:WIX_URL" -OutFile wix.zip -UseBasicParsing
+          Expand-Archive wix.zip wix
+          $exe = (Resolve-Path "windows/build-${{ matrix.name }}/Release/DSHWebView.exe").Path
+          $icon = (Resolve-Path "AppIcon.ico").Path
+          # Quote every -d define as one token so dotted versions (e.g. 1.0.5)
+          # aren't parsed by candle as a trailing source file (CNDL0103), and
+          # pass the icon as an absolute path so light.exe finds it (LGHT0103).
+          & "$PWD/wix/candle.exe" -nologo `
+            "-dVersion=${{ steps.version.outputs.version }}" `
+            "-dPlatform=x64" `
+            "-dExePath=$exe" `
+            "-dIconPath=$icon" `
+            windows/installer/DSHWebView.wxs
+          if ($LASTEXITCODE -ne 0) { throw "candle failed" }
+          # Write the WiX debug symbols (.wixpdb) outside staging so it never
+          # ends up in the uploaded/released assets.
+          & "$PWD/wix/light.exe" -nologo `
+            -o "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}.msi" `
+            -pdbout "DSHWebView-${{ matrix.name }}.wixpdb" `
+            DSHWebView.wixobj
+          if ($LASTEXITCODE -ne 0) { throw "light failed" }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/*.dmg
-          generate_release_notes: true
+          name: dsh-windows-${{ matrix.name }}
+          path: |
+            staging/*.exe
+            staging/*.msi
+          if-no-files-found: error
+
+  linux:
+    name: Build Linux (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x64: native build on the oldest supported distro (WebKitGTK 2.36).
+          - name: x64
+            arch: amd64
+            tarname: x86_64
+            cross: false
+          # arm64: cross-compiled on the same ubuntu-22.04 runner so its glibc
+          # baseline matches x64 (native arm64 runners ship glibc 2.39+).
+          - name: arm64
+            arch: arm64
+            tarname: aarch64
+            cross: true
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build pkg-config g++ \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            sudo dpkg --add-architecture arm64
+            # Ubuntu's amd64 repos (archive/security.ubuntu.com) carry no arm64
+            # indexes; pin the existing sources to amd64 and add the arm64
+            # Ubuntu Ports sources (ports.ubuntu.com) instead.
+            if [ -f /etc/apt/sources.list ]; then
+              sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+            fi
+            printf '%s\n' \
+              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse' \
+              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse' \
+              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse' \
+              | sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null
+            sudo apt-get update
+            sudo apt-get install -y \
+              crossbuild-essential-arm64 \
+              libwebkit2gtk-4.1-dev:arm64 libgtk-3-dev:arm64 libsoup-3.0-dev:arm64
+          fi
+
+      - name: Configure (Ninja, Release)
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
+            cmake -S linux -B linux/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/linux/cmake/toolchain-aarch64.cmake"
+          else
+            cmake -S linux -B linux/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          fi
+
+      - name: Build
+        run: cmake --build linux/build
+
+      - name: Verify architecture
+        run: file linux/build/dshwebview
+
+      - name: Resolve version (from tag or default)
+        id: version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if [ -z "$v" ]; then v='1.0.0'; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Stage portable tarball
+        run: |
+          ver="${{ steps.version.outputs.version }}"
+          dir="staging/DeepSeek Harness-$ver-linux-${{ matrix.tarname }}"
+          mkdir -p "$dir"
+          cp linux/build/dshwebview "$dir/"
+          cp linux/resources/deepseek-harness.svg "$dir/"
+          cp linux/resources/deepseek-harness.png "$dir/"
+          cp linux/resources/deepseek-harness.desktop "$dir/"
+          printf '%s\n' \
+            'DeepSeek Harness - Linux (${{ matrix.tarname }})' \
+            '' \
+            'Run: ./dshwebview' \
+            'Dependencies: libwebkit2gtk-4.1-0, libgtk-3-0, libsoup-3.0-0, Node.js 18+ (with npx).' \
+            'For a desktop integration, install the .deb package instead.' > "$dir/README.txt"
+          tar -C staging -czf "staging/DeepSeek Harness-$ver-linux-${{ matrix.tarname }}.tar.gz" \
+            "DeepSeek Harness-$ver-linux-${{ matrix.tarname }}"
+          rm -rf "$dir"
+
+      - name: Build .deb package
+        run: |
+          ver="${{ steps.version.outputs.version }}"
+          pkg="staging/deepseek-harness_${ver}_${{ matrix.arch }}"
+          mkdir -p "$pkg/DEBIAN"
+          mkdir -p "$pkg/usr/bin"
+          mkdir -p "$pkg/usr/share/applications"
+          mkdir -p "$pkg/usr/share/icons/hicolor/scalable/apps"
+          mkdir -p "$pkg/usr/share/icons/hicolor/256x256/apps"
+          cat > "$pkg/DEBIAN/control" <<EOF
+          Package: deepseek-harness
+          Version: ${ver}
+          Section: utils
+          Priority: optional
+          Architecture: ${{ matrix.arch }}
+          Maintainer: Tony Tsang <tonytsangzen@gmail.com>
+          Depends: libwebkit2gtk-4.1-0 (>= 2.36), libgtk-3-0 (>= 3.24), libsoup-3.0-0
+          Description: DeepSeek Harness desktop shell
+           Native desktop shell (WebKitGTK) for the DeepSeek Harness web UI.
+           Spawns 'npx @deepseek-ai/dsh web' and renders it in a system webview.
+          EOF
+          cp linux/build/dshwebview "$pkg/usr/bin/dshwebview"
+          cp linux/resources/deepseek-harness.desktop "$pkg/usr/share/applications/"
+          cp linux/resources/deepseek-harness.svg \
+            "$pkg/usr/share/icons/hicolor/scalable/apps/"
+          cp linux/resources/deepseek-harness.png \
+            "$pkg/usr/share/icons/hicolor/256x256/apps/"
+          dpkg-deb --build --root-owner-group "$pkg"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-linux-${{ matrix.name }}
+          path: |
+            staging/*.tar.gz
+            staging/*.deb
+          if-no-files-found: error
+
+  publish:
+    name: Attach all assets to release
+    needs: [macos, windows, linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Attach all assets to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          # download-artifact@v4 unpacks each artifact into its own
+          # artifacts/<name>/ directory; collect files only (-type f) so those
+          # directories are never passed to gh as upload paths, and exclude any
+          # leftover .wixpdb debug-symbol files.
+          mapfile -t assets < <(find artifacts -type f ! -name '*.wixpdb' -print | sort)
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --generate-notes
+          fi
