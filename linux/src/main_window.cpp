@@ -8,8 +8,11 @@
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 
+#include <climits>
 #include <cstdio>
 #include <string>
+
+#include <unistd.h>
 
 #include <gdk/gdkkeys.h>
 #include <gdk/gdkkeysyms.h>
@@ -21,6 +24,45 @@ namespace {
 // ---- small helpers ---------------------------------------------------------
 
 constexpr const char* kSettingsFile = "settings.conf";
+
+// Directory of the running executable (portable tarballs ship the icon next
+// to the binary).
+std::string ExeDir() {
+    char buf[PATH_MAX];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return {};
+    buf[n] = '\0';
+    std::string path(buf);
+    size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
+}
+
+// Sets the window icon: prefer a real icon next to the executable or in the
+// installed hicolor theme (PNG first — GdkPixbuf loads it natively; SVG needs
+// the librsvg loader), then fall back to the theme by name.
+void ApplyWindowIcon() {
+    const char* candidates[] = {
+        "deepseek-harness.png",
+        "/usr/share/icons/hicolor/256x256/apps/deepseek-harness.png",
+        "/usr/share/icons/hicolor/scalable/apps/deepseek-harness.svg",
+        "deepseek-harness.svg",
+    };
+    std::string exeDir = ExeDir();
+    for (const char* rel : candidates) {
+        std::string path = rel[0] == '/' ? std::string(rel) : exeDir + "/" + rel;
+        if (!g_file_test(path.c_str(), G_FILE_TEST_EXISTS)) continue;
+        GError* error = nullptr;
+        GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(path.c_str(), &error);
+        if (error) {
+            g_error_free(error);
+            continue;
+        }
+        gtk_window_set_default_icon(pixbuf);
+        g_object_unref(pixbuf);
+        return;
+    }
+    gtk_window_set_default_icon_name("deepseek-harness");
+}
 
 // Sends a synthetic key press+release to a widget (used by the Edit menu so
 // cut/copy/paste work through the focused WebKitWebView).
@@ -139,7 +181,7 @@ bool MainWindow::IsChinese() const {
 // ---- UI ----------------------------------------------------------------------
 
 void MainWindow::BuildUi() {
-    gtk_window_set_default_icon_name("applications-internet");
+    ApplyWindowIcon();
 
     window_ = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window_), "DeepSeek Harness");

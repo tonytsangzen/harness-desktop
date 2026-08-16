@@ -63,6 +63,7 @@ jobs:
           mkdir -p "$dir"
           cp linux/build/dshwebview "$dir/"
           cp linux/resources/deepseek-harness.svg "$dir/"
+          cp linux/resources/deepseek-harness.png "$dir/"
           cp linux/resources/deepseek-harness.desktop "$dir/"
           printf '%s\n' \
             'DeepSeek Harness - Linux (${{ matrix.tarname }})' \
@@ -82,6 +83,7 @@ jobs:
           mkdir -p "$pkg/usr/bin"
           mkdir -p "$pkg/usr/share/applications"
           mkdir -p "$pkg/usr/share/icons/hicolor/scalable/apps"
+          mkdir -p "$pkg/usr/share/icons/hicolor/256x256/apps"
           cat > "$pkg/DEBIAN/control" <<EOF
           Package: deepseek-harness
           Version: ${ver}
@@ -98,6 +100,8 @@ jobs:
           cp linux/resources/deepseek-harness.desktop "$pkg/usr/share/applications/"
           cp linux/resources/deepseek-harness.svg \
             "$pkg/usr/share/icons/hicolor/scalable/apps/"
+          cp linux/resources/deepseek-harness.png \
+            "$pkg/usr/share/icons/hicolor/256x256/apps/"
           dpkg-deb --build --root-owner-group "$pkg"
 
       - name: Upload artifacts
