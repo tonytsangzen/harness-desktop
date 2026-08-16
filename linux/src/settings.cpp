@@ -1,5 +1,6 @@
 #include "settings.h"
 
+#include <cstdio>
 #include <cstdlib>
 
 namespace dsh {

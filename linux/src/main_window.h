@@ -85,6 +85,8 @@ private:
     static WebKitWebView* OnCreateWebView(WebKitWebView* webView,
                                           WebKitNavigationAction* action, gpointer userData);
     static void OnLoadChanged(WebKitWebView* webView, WebKitLoadEvent event, gpointer userData);
+    static void OnLoadFailed(WebKitWebView* webView, WebKitLoadEvent event,
+                             const gchar* failingUri, GError* error, gpointer userData);
     static void OnDownloadStart(WebKitWebContext* context, WebKitDownload* download, gpointer userData);
     static gboolean OnDecideDestination(WebKitDownload* download, const gchar* suggestedFilename, gpointer userData);
     static void OnDownloadProgress(WebKitDownload* download, GParamSpec* param, gpointer userData);

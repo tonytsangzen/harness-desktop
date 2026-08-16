@@ -1,6 +1,7 @@
 #include "util.h"
 
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include <cstdlib>
 #include <fstream>

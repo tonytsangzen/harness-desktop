@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <string>
 
+#include <gdk/gdkkeys.h>
 #include <gdk/gdkkeysyms.h>
 
 namespace dsh {
@@ -25,6 +26,17 @@ constexpr const char* kSettingsFile = "settings.conf";
 // cut/copy/paste work through the focused WebKitWebView).
 void SendKey(GtkWidget* widget, guint keyval, GdkModifierType state) {
     gtk_widget_grab_focus(widget);
+    // Resolve the keycode from the default keymap (gdk_keyval_to_keycode is
+    // X11-only and not available in the generic GDK3 headers).
+    guint keycode = 0;
+    if (GdkKeymap* keymap = gdk_keymap_get_for_display(gdk_display_get_default())) {
+        GdkKeymapKey* keys = nullptr;
+        gint n = 0;
+        if (gdk_keymap_get_entries_for_keyval(keymap, keyval, &keys, &n) && n > 0 && keys) {
+            keycode = keys[0].keycode;
+            g_free(keys);
+        }
+    }
     GdkEventKey press{};
     press.type = GDK_KEY_PRESS;
     press.window = gtk_widget_get_window(widget);
@@ -33,7 +45,7 @@ void SendKey(GtkWidget* widget, guint keyval, GdkModifierType state) {
     press.time = GDK_CURRENT_TIME;
     press.state = state;
     press.keyval = keyval;
-    press.hardware_keycode = gdk_keyval_to_keycode(keyval);
+    press.hardware_keycode = keycode;
     press.group = 0;
     press.is_modifier = FALSE;
     gtk_widget_event(widget, reinterpret_cast<GdkEvent*>(&press));
@@ -150,7 +162,6 @@ void MainWindow::BuildUi() {
     // Web view.
     webSettings_ = webkit_settings_new();
     webkit_settings_set_enable_developer_extras(webSettings_, FALSE);
-    webkit_settings_set_enable_plugins(webSettings_, FALSE);
     webkit_settings_set_enable_write_console_messages_to_stdout(webSettings_, TRUE);
     g_object_ref_sink(webSettings_); // own the floating reference
 
@@ -158,6 +169,7 @@ void MainWindow::BuildUi() {
     g_signal_connect(webview_, "decide-policy", G_CALLBACK(OnDecidePolicy), this);
     g_signal_connect(webview_, "create", G_CALLBACK(OnCreateWebView), this);
     g_signal_connect(webview_, "load-changed", G_CALLBACK(OnLoadChanged), this);
+    g_signal_connect(webview_, "load-failed", G_CALLBACK(OnLoadFailed), this);
     g_signal_connect(webkit_web_context_get_default(), "download-start",
                      G_CALLBACK(OnDownloadStart), this);
 
@@ -214,7 +226,8 @@ void MainWindow::RebuildMenu() {
         struct Entry { const char* label; guint key; GdkModifierType mods; EditAction action; };
         const Entry entries[] = {
             { zh ? "撤销" : "Undo", GDK_KEY_z, GDK_CONTROL_MASK, kEditUndo },
-            { zh ? "重做" : "Redo", GDK_KEY_z, GDK_CONTROL_MASK | GDK_SHIFT_MASK, kEditRedo },
+            { zh ? "重做" : "Redo", GDK_KEY_z,
+              static_cast<GdkModifierType>(GDK_CONTROL_MASK | GDK_SHIFT_MASK), kEditRedo },
             { zh ? "剪切" : "Cut", GDK_KEY_x, GDK_CONTROL_MASK, kEditCut },
             { zh ? "拷贝" : "Copy", GDK_KEY_c, GDK_CONTROL_MASK, kEditCopy },
             { zh ? "粘贴" : "Paste", GDK_KEY_v, GDK_CONTROL_MASK, kEditPaste },
@@ -309,10 +322,17 @@ void MainWindow::ApplyTheme() {
         g_object_set(gs, "gtk-application-prefer-dark-theme", initialDarkPref_, nullptr);
     }
     if (webSettings_) {
-        WebKitPreferredColorScheme scheme = WEBKIT_PREFERRED_COLOR_SCHEME_AUTO;
-        if (theme_ == Theme::Light) scheme = WEBKIT_PREFERRED_COLOR_SCHEME_LIGHT;
-        else if (theme_ == Theme::Dark) scheme = WEBKIT_PREFERRED_COLOR_SCHEME_DARK;
-        webkit_settings_set_preferred_color_scheme(webSettings_, scheme);
+        // Drive the web content's prefers-color-scheme through the explicit
+        // WebKitGTK property when available (added in 2.38). On older releases
+        // (e.g. Ubuntu 22.04's 2.36) the property does not exist and the media
+        // query follows the GTK dark variant set above — same visible result.
+        GParamSpec* pspec = g_object_class_find_property(
+            G_OBJECT_GET_CLASS(webSettings_), "preferred-color-scheme");
+        if (pspec) {
+            // WebKitPreferredColorScheme: AUTO=0, LIGHT=1, DARK=2.
+            guint scheme = theme_ == Theme::Light ? 1 : (theme_ == Theme::Dark ? 2 : 0);
+            g_object_set(webSettings_, "preferred-color-scheme", scheme, nullptr);
+        }
     }
 }
 
@@ -359,7 +379,8 @@ void MainWindow::SetDownloadProgressVisible(bool visible) {
 
 void MainWindow::ShowError(const std::string& message) {
     GtkWidget* dialog = gtk_message_dialog_new(
-        GTK_WINDOW(window_), GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+        GTK_WINDOW(window_),
+        static_cast<GtkDialogFlags>(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
         GTK_MESSAGE_ERROR, GTK_BUTTONS_OK, "%s", message.c_str());
     gtk_dialog_run(GTK_DIALOG(dialog));
     gtk_widget_destroy(dialog);
@@ -508,7 +529,10 @@ void MainWindow::OnDecidePolicy(WebKitWebView* /*webView*/, WebKitPolicyDecision
         WebKitNavigationAction* action =
             webkit_navigation_policy_decision_get_navigation_action(
                 WEBKIT_NAVIGATION_POLICY_DECISION(decision));
-        const gchar* uri = webkit_navigation_action_get_uri(action);
+        const gchar* uri = nullptr;
+        if (WebKitURIRequest* request = webkit_navigation_action_get_request(action)) {
+            uri = webkit_uri_request_get_uri(request);
+        }
         if (uri && uri[0] && !self->IsAppUrl(uri)) {
             // External target → system default browser, never inside the webview.
             self->OpenExternal(uri);
@@ -530,8 +554,10 @@ WebKitWebView* MainWindow::OnCreateWebView(WebKitWebView* /*webView*/,
     // New-window requests (target="_blank", window.open) open in the system
     // default browser; never create a second window inside the shell.
     if (action) {
-        if (const gchar* uri = webkit_navigation_action_get_uri(action); uri && uri[0]) {
-            self->OpenExternal(uri);
+        if (WebKitURIRequest* request = webkit_navigation_action_get_request(action)) {
+            if (const gchar* uri = webkit_uri_request_get_uri(request); uri && uri[0]) {
+                self->OpenExternal(uri);
+            }
         }
     }
     return nullptr;
@@ -539,10 +565,19 @@ WebKitWebView* MainWindow::OnCreateWebView(WebKitWebView* /*webView*/,
 
 void MainWindow::OnLoadChanged(WebKitWebView* /*webView*/, WebKitLoadEvent event, gpointer userData) {
     auto* self = static_cast<MainWindow*>(userData);
-    if (event == WEBKIT_LOAD_FINISHED || event == WEBKIT_LOAD_FAILED) {
-        self->SetLoadingOverlay(false);
-    } else if (event == WEBKIT_LOAD_STARTED) {
+    if (event == WEBKIT_LOAD_STARTED) {
         self->SetLoadingOverlay(true);
+    } else if (event == WEBKIT_LOAD_FINISHED) {
+        self->SetLoadingOverlay(false);
+    }
+}
+
+void MainWindow::OnLoadFailed(WebKitWebView* /*webView*/, WebKitLoadEvent /*event*/,
+                              const gchar* /*failingUri*/, GError* error, gpointer userData) {
+    auto* self = static_cast<MainWindow*>(userData);
+    self->SetLoadingOverlay(false);
+    if (error && error->code != WEBKIT_NETWORK_ERROR_CANCELLED) {
+        g_printerr("dshwebview: page load failed: %s\n", error->message);
     }
 }
 
@@ -577,7 +612,7 @@ gboolean MainWindow::OnDecideDestination(WebKitDownload* download, const gchar* 
         if (filename) {
             gchar* uri = g_filename_to_uri(filename, nullptr, nullptr);
             if (uri) {
-                webkit_download_set_destination_uri(download, uri);
+                webkit_download_set_destination(download, uri);
                 g_free(uri);
             }
             g_free(filename);
@@ -659,7 +694,8 @@ void MainWindow::OnEditActivate(GtkWidget* item, gpointer userData) {
     int action = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(item), "edit-action"));
     switch (action) {
         case kEditUndo: SendKey(self->webview_, GDK_KEY_z, GDK_CONTROL_MASK); break;
-        case kEditRedo: SendKey(self->webview_, GDK_KEY_z, GDK_CONTROL_MASK | GDK_SHIFT_MASK); break;
+        case kEditRedo: SendKey(self->webview_, GDK_KEY_z,
+                                static_cast<GdkModifierType>(GDK_CONTROL_MASK | GDK_SHIFT_MASK)); break;
         case kEditCut: SendKey(self->webview_, GDK_KEY_x, GDK_CONTROL_MASK); break;
         case kEditCopy: SendKey(self->webview_, GDK_KEY_c, GDK_CONTROL_MASK); break;
         case kEditPaste: SendKey(self->webview_, GDK_KEY_v, GDK_CONTROL_MASK); break;
