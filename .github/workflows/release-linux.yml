@@ -64,6 +64,12 @@ jobs:
       - name: Configure (Ninja, Release)
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
+            echo "== arm64 pkgconfig dir =="
+            ls /usr/lib/aarch64-linux-gnu/pkgconfig/ | head -20
+            echo "== pkg-config env =="
+            echo "LIBDIR=$PKG_CONFIG_LIBDIR SYSROOT=$PKG_CONFIG_SYSROOT_DIR"
+            PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig \
+            PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu \
             cmake -S linux -B linux/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/linux/cmake/toolchain-aarch64.cmake"
           else
