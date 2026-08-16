@@ -60,7 +60,7 @@ target_include_directories(DSHWebView PRIVATE src "${WEBVIEW2_INCLUDE}")
 
 target_link_libraries(DSHWebView PRIVATE
     "${WEBVIEW2_LIB}"
-    winhttp ws2_32 shell32 shlwapi ole32 oleaut32 comctl32 advapi32 version user32 gdi32 uuid crypt32
+    winhttp ws2_32 shell32 shlwapi ole32 oleaut32 comctl32 advapi32 version user32 gdi32 uuid crypt32 dwmapi
 )
 
 target_compile_options(DSHWebView PRIVATE /W3 /wd4996 /utf-8)

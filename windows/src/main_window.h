@@ -19,6 +19,11 @@ struct DownloadStatusInfo {
 // threads marshal back to the UI thread with PostMessage.
 class MainWindow {
 public:
+    // UI theme: follow the OS, force light, or force dark.
+    enum class Theme { System = 0, Light = 1, Dark = 2 };
+    // Menu language: follow the OS locale, force Chinese, or force English.
+    enum class Lang { System = 0, Zh = 1, En = 2 };
+
     static MainWindow& Instance();
 
     bool Create(HINSTANCE instance, const std::wstring& title);
@@ -37,11 +42,15 @@ private:
     HWND hwnd_ = nullptr;
     HWND overlayHwnd_ = nullptr;
     HWND downloadHwnd_ = nullptr;
+    HMENU menu_ = nullptr;
     bool downloadBarVisible_ = false;
     int spinnerFrame_ = 0;
 
     std::wstring overlayText_;
     int overlayPercent_ = -1;
+
+    Theme theme_ = Theme::System;
+    Lang lang_ = Lang::System;
 
     DownloadInfo download_;
 
@@ -52,6 +61,16 @@ private:
     void OnSize();
     void OnDestroy();
     void OnTimer();
+
+    // Theme & language.
+    bool IsChinese() const;
+    void LoadSettings(); // read theme/language from the registry
+    void SaveSettings(); // write theme/language to the registry
+    void RebuildMenu();  // recreate the menu bar with the current language/state
+    void SetTheme(Theme theme);
+    void SetLang(Lang lang);
+    void ApplyTheme(); // window chrome + overlay + webview color scheme
+    void ApplyWebViewTheme();
 
     // Overlay / download bar controls.
     void ShowOverlay();
@@ -100,6 +119,7 @@ public:
     const std::wstring& DownloadFilename() const { return download_.filename; }
     long long DownloadReceived() const { return download_.received; }
     long long DownloadTotal() const { return download_.total; }
+    bool DarkMode() const { return theme_ == Theme::Dark; }
 };
 
 // PostMessage helpers shared with worker threads.

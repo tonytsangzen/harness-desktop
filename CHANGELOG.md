@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-08-16
+
+### 新增
+
+- 主题设置菜单（macOS + Windows）：明亮 / 暗黑 / 跟随系统三档，跟随系统为默认；暗黑模式下 macOS 原生外观与 `prefers-color-scheme`、Windows 标题栏与 WebView2 配色同步切换，选择持久化（macOS UserDefaults / Windows 注册表）。
+- 菜单多语言支持（macOS + Windows）：中文（简体中文）与英文两种，默认跟随系统语言，可在菜单中随时切换并持久化。
+
 ## [1.0.6] - 2026-08-16
 
 ### 新增

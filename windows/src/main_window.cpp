@@ -17,6 +17,8 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <shellapi.h>
+#include <dwmapi.h>
+#include <winnls.h>
 
 #include <cmath>
 #include <memory>
@@ -48,9 +50,16 @@ const UINT kWM_DownloadFailed = WM_APP + 10;
 const UINT_PTR kSpinnerTimer = 1;
 const int kDownloadBarHeight = 48;
 const UINT_PTR kIDM_PluginsMarket = 40001;
+const UINT_PTR kIDM_ThemeSystem = 40002;
+const UINT_PTR kIDM_ThemeLight = 40003;
+const UINT_PTR kIDM_ThemeDark = 40004;
+const UINT_PTR kIDM_LangZh = 40005;
+const UINT_PTR kIDM_LangEn = 40006;
 
 const COLORREF kOverlayBg = RGB(0xFF, 0xFF, 0xFF);
 const COLORREF kOverlayText = RGB(0x20, 0x20, 0x20);
+const COLORREF kOverlayBgDark = RGB(0x1E, 0x1E, 0x1E);
+const COLORREF kOverlayTextDark = RGB(0xE8, 0xE8, 0xE8);
 const COLORREF kOverlayTrack = RGB(0xE0, 0xE0, 0xE0);
 const COLORREF kOverlayDot = RGB(0xD8, 0xD8, 0xD8);
 const COLORREF kAccentColor = RGB(0x4F, 0x8C, 0xFF);
@@ -159,6 +168,37 @@ bool OpenInDefaultBrowser(const std::wstring& uri) {
     return reinterpret_cast<INT_PTR>(result) > 32;
 }
 
+// ---- HKCU\Software\DeepSeekHarness settings (theme & menu language) ----
+
+std::wstring ReadRegStr(const wchar_t* name) {
+    HKEY key = nullptr;
+    std::wstring value;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\DeepSeekHarness", 0, KEY_READ, &key) == ERROR_SUCCESS) {
+        DWORD size = 0;
+        if (RegQueryValueExW(key, name, nullptr, nullptr, nullptr, &size) == ERROR_SUCCESS && size > 0) {
+            value.resize(size / sizeof(wchar_t));
+            DWORD written = size;
+            if (RegQueryValueExW(key, name, nullptr, nullptr,
+                                 reinterpret_cast<LPBYTE>(value.data()), &written) != ERROR_SUCCESS) {
+                value.clear();
+            }
+            while (!value.empty() && value.back() == L'\0') value.pop_back();
+        }
+        RegCloseKey(key);
+    }
+    return value;
+}
+
+void WriteRegStr(const wchar_t* name, const std::wstring& value) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\DeepSeekHarness", 0, nullptr, 0,
+                        KEY_WRITE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()),
+                       static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(key);
+    }
+}
+
 } // namespace
 
 void PostOverlayStatus(const std::wstring& text) { PostString(kWM_OverlayStatus, text); }
@@ -234,13 +274,15 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             auto& inst = MainWindow::Instance();
             RECT rc;
             GetClientRect(hwnd, &rc);
-            HBRUSH bg = CreateSolidBrush(kOverlayBg);
+            COLORREF bgColor = inst.DarkMode() ? kOverlayBgDark : kOverlayBg;
+            COLORREF textColor = inst.DarkMode() ? kOverlayTextDark : kOverlayText;
+            HBRUSH bg = CreateSolidBrush(bgColor);
             FillRect(dc, &rc, bg);
             DeleteObject(bg);
 
             HGDIOBJ oldFont = SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
             SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, kOverlayText);
+            SetTextColor(dc, textColor);
 
             // Spinner: rotating ring of dots.
             int cx = rc.right / 2;
@@ -363,13 +405,15 @@ bool MainWindow::Create(HINSTANCE instance, const std::wstring& title) {
     downloadWc.lpszClassName = L"DSHWebViewDownloadBar";
     RegisterClassExW(&downloadWc);
 
-    // Window menu bar: "Plugins Market" opens the plugins site in the system
-    // default browser.
-    HMENU menu = CreateMenu();
-    AppendMenuW(menu, MF_STRING, kIDM_PluginsMarket, L"Plugins Market");
+    // Restore persisted theme/language, then build the menu bar (its labels
+    // follow the effective language). RebuildMenu() stores the handle in
+    // menu_; it is passed to CreateWindowExW so the window owns it.
+    LoadSettings();
+    RebuildMenu();
 
     hwnd_ = CreateWindowExW(0, L"DSHWebViewMainWindow", title.c_str(), WS_OVERLAPPEDWINDOW,
-                            CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, nullptr, menu, instance, nullptr);
+                            CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, nullptr, menu_, instance, nullptr);
+    if (hwnd_) ApplyTheme();
     return hwnd_ != nullptr;
 }
 
@@ -387,6 +431,121 @@ void MainWindow::Run() {
 }
 
 void MainWindow::Close() { PostMessageW(hwnd_, WM_CLOSE, 0, 0); }
+
+// ---- Theme & language ----
+
+bool MainWindow::IsChinese() const {
+    if (lang_ != Lang::System) return lang_ == Lang::Zh;
+    return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE;
+}
+
+void MainWindow::LoadSettings() {
+    std::wstring theme = ReadRegStr(L"Theme");
+    if (theme == L"light") theme_ = Theme::Light;
+    else if (theme == L"dark") theme_ = Theme::Dark;
+    else theme_ = Theme::System;
+
+    std::wstring lang = ReadRegStr(L"Language");
+    if (lang == L"zh") lang_ = Lang::Zh;
+    else if (lang == L"en") lang_ = Lang::En;
+    else lang_ = Lang::System;
+}
+
+void MainWindow::SaveSettings() {
+    WriteRegStr(L"Theme", theme_ == Theme::Light ? L"light" : theme_ == Theme::Dark ? L"dark" : L"system");
+    WriteRegStr(L"Language", lang_ == Lang::Zh ? L"zh" : lang_ == Lang::En ? L"en" : L"system");
+}
+
+// Recreate the menu bar with the current language and checked radio states.
+// The old menu handle (detached by SetMenu) is destroyed here; the window
+// owns whichever menu is currently attached.
+void MainWindow::RebuildMenu() {
+    bool zh = IsChinese();
+    HMENU menu = CreateMenu();
+
+    // Theme popup: 跟随系统 / 明亮 / 暗黑.
+    HMENU themeMenu = CreatePopupMenu();
+    AppendMenuW(themeMenu, MF_STRING | (theme_ == Theme::System ? MF_CHECKED : 0),
+                kIDM_ThemeSystem, zh ? L"跟随系统" : L"Follow System");
+    AppendMenuW(themeMenu, MF_STRING | (theme_ == Theme::Light ? MF_CHECKED : 0),
+                kIDM_ThemeLight, zh ? L"明亮" : L"Light");
+    AppendMenuW(themeMenu, MF_STRING | (theme_ == Theme::Dark ? MF_CHECKED : 0),
+                kIDM_ThemeDark, zh ? L"暗黑" : L"Dark");
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(themeMenu), zh ? L"主题" : L"Theme");
+
+    // Language popup: each option shows its native name.
+    HMENU langMenu = CreatePopupMenu();
+    bool zhActive = IsChinese();
+    AppendMenuW(langMenu, MF_STRING | (zhActive ? MF_CHECKED : 0), kIDM_LangZh, L"简体中文");
+    AppendMenuW(langMenu, MF_STRING | (!zhActive ? MF_CHECKED : 0), kIDM_LangEn, L"English");
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(langMenu), zh ? L"语言" : L"Language");
+
+    // Plugins Market.
+    AppendMenuW(menu, MF_STRING, kIDM_PluginsMarket, zh ? L"插件市场" : L"Plugins Market");
+
+    HMENU old = menu_;
+    menu_ = menu;
+    if (hwnd_) {
+        SetMenu(hwnd_, menu_);
+        DrawMenuBar(hwnd_);
+    }
+    if (old) DestroyMenu(old);
+}
+
+void MainWindow::SetTheme(Theme theme) {
+    if (theme_ == theme) return;
+    theme_ = theme;
+    SaveSettings();
+    ApplyTheme();
+    RebuildMenu(); // refresh the checked radio state
+}
+
+void MainWindow::SetLang(Lang lang) {
+    if (lang_ == lang) return;
+    lang_ = lang;
+    SaveSettings();
+    RebuildMenu(); // relabel the whole menu bar
+}
+
+void MainWindow::ApplyTheme() {
+    if (hwnd_) {
+        // Dark title bar / frame (best-effort; Windows 10 1809+).
+        BOOL dark = theme_ == Theme::Dark;
+        DwmSetWindowAttribute(hwnd_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+        if (overlayHwnd_) InvalidateRect(overlayHwnd_, nullptr, FALSE);
+    }
+    ApplyWebViewTheme();
+}
+
+void MainWindow::ApplyWebViewTheme() {
+    if (!g_core) return;
+
+    // prefers-color-scheme for the web content (WebView2 SDK 1.0.1518+):
+    // the profile owns the preferred color scheme.
+    ComPtr<ICoreWebView2_13> core13;
+    if (SUCCEEDED(g_core.As(&core13))) {
+        ComPtr<ICoreWebView2Profile> profile;
+        if (SUCCEEDED(core13->get_Profile(&profile))) {
+            COREWEBVIEW2_PREFERRED_COLOR_SCHEME scheme = COREWEBVIEW2_PREFERRED_COLOR_SCHEME_AUTO;
+            if (theme_ == Theme::Light) scheme = COREWEBVIEW2_PREFERRED_COLOR_SCHEME_LIGHT;
+            else if (theme_ == Theme::Dark) scheme = COREWEBVIEW2_PREFERRED_COLOR_SCHEME_DARK;
+            profile->put_PreferredColorScheme(scheme);
+        }
+    }
+
+    // Blank background (avoids a white flash between navigations).
+    ComPtr<ICoreWebView2Controller2> controller2;
+    if (SUCCEEDED(g_controller.As(&controller2))) {
+        COREWEBVIEW2_COLOR bg{};
+        bg.A = 255;
+        if (theme_ == Theme::Dark) {
+            bg.R = 0x20; bg.G = 0x20; bg.B = 0x20;
+        } else {
+            bg.R = 0xFF; bg.G = 0xFF; bg.B = 0xFF;
+        }
+        controller2->put_DefaultBackgroundColor(bg);
+    }
+}
 
 void MainWindow::OnCreate() {
     overlayHwnd_ = CreateWindowExW(0, L"DSHWebViewOverlay", L"", WS_CHILD | WS_VISIBLE,
@@ -502,6 +661,7 @@ void MainWindow::InitWebView2() {
                     controller->put_ParentWindow(hwnd_);
                     ConfigureWebView();
                     WireEvents();
+                    ApplyWebViewTheme();
                     LayoutChildWindows();
                     return S_OK;
                 });
@@ -949,9 +1109,15 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         case kWM_UpdateFinished: OnUpdateFinished(wParam != 0); return 0;
         case kWM_DownloadFailed: OnDownloadFailed(reinterpret_cast<std::wstring*>(lParam)); return 0;
         case WM_COMMAND:
-            if (LOWORD(wParam) == kIDM_PluginsMarket) {
-                OpenInDefaultBrowser(L"https://tonytsangzen.github.io/harness-market/");
-                return 0;
+            switch (LOWORD(wParam)) {
+                case kIDM_PluginsMarket:
+                    OpenInDefaultBrowser(L"https://tonytsangzen.github.io/harness-market/");
+                    return 0;
+                case kIDM_ThemeSystem: SetTheme(Theme::System); return 0;
+                case kIDM_ThemeLight: SetTheme(Theme::Light); return 0;
+                case kIDM_ThemeDark: SetTheme(Theme::Dark); return 0;
+                case kIDM_LangZh: SetLang(Lang::Zh); return 0;
+                case kIDM_LangEn: SetLang(Lang::En); return 0;
             }
             return 0;
         case WM_GETMINMAXINFO: {

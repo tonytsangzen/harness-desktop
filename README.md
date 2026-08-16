@@ -138,6 +138,7 @@ On launch the app:
 5. Terminates the child process when the last window closes.
 6. Opens external links and new-window requests (`target="_blank"`, `window.open`) in the **system default browser**; only pages served by the local dsh server navigate inside the webview.
 7. Provides a **Plugins Market…** item under the **Help** menu that opens the plugins market (https://tonytsangzen.github.io/harness-market/) in the default browser.
+8. Offers theme and language settings under the **View** menu: theme follows the system by default with **Light**/**Dark** overrides (affects the native chrome and the web content's `prefers-color-scheme`), and the menu language follows the system locale by default with **简体中文**/**English** overrides. Both persist across launches.
 
 The first launch downloads `@deepseek-ai/dsh` via npx, so startup can take a while.
 
@@ -202,6 +203,11 @@ shell's behavior:
 7. Provides a **Plugins Market** item in the window menu bar that opens the
    plugins market (https://tonytsangzen.github.io/harness-market/) in the
    default browser.
+8. Offers **Theme** and **Language** menus in the window menu bar: theme
+   follows the system by default with **Light**/**Dark** overrides (dark mode
+   also darkens the title bar and the WebView2 color scheme), and the menu
+   language follows the system locale by default with **简体中文**/**English**
+   overrides. Both persist across launches (HKCU registry).
 
 ### Build (Windows)
 

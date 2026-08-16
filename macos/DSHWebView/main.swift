@@ -12,6 +12,96 @@ private let startupTimeoutSeconds: TimeInterval = 180
 /// Retry interval when probing the server.
 private let probeIntervalSeconds: TimeInterval = 0.25
 
+// MARK: - Theme & language
+
+/// The app's UI theme. `system` follows the OS light/dark appearance.
+enum Theme: Int {
+    case system = 0
+    case light = 1
+    case dark = 2
+}
+
+/// The menu language. `system` follows the OS locale (中文 / English).
+enum AppLanguage: Int {
+    case system = 0
+    case zh = 1
+    case en = 2
+
+    /// Resolve `.system` to the concrete UI language from the OS preference.
+    var resolved: AppLanguage {
+        if self != .system { return self }
+        let first = Locale.preferredLanguages.first?.lowercased() ?? "en"
+        return first.hasPrefix("zh") ? .zh : .en
+    }
+}
+
+/// Localized labels for every menu item. Two languages (中文 / English);
+/// which one is active follows the system by default and can be switched from
+/// the View > Language menu.
+struct MenuStrings {
+    let checkForUpdates: String
+    let quitFormat: String
+    let edit: String
+    let undo: String
+    let redo: String
+    let cut: String
+    let copy: String
+    let paste: String
+    let selectAll: String
+    let view: String
+    let theme: String
+    let followSystem: String
+    let light: String
+    let dark: String
+    let language: String
+    let help: String
+    let pluginsMarket: String
+
+    static let english = MenuStrings(
+        checkForUpdates: "Check for Updates…",
+        quitFormat: "Quit %@",
+        edit: "Edit",
+        undo: "Undo",
+        redo: "Redo",
+        cut: "Cut",
+        copy: "Copy",
+        paste: "Paste",
+        selectAll: "Select All",
+        view: "View",
+        theme: "Theme",
+        followSystem: "Follow System",
+        light: "Light",
+        dark: "Dark",
+        language: "Language",
+        help: "Help",
+        pluginsMarket: "Plugins Market…"
+    )
+
+    static let chinese = MenuStrings(
+        checkForUpdates: "检查更新…",
+        quitFormat: "退出 %@",
+        edit: "编辑",
+        undo: "撤销",
+        redo: "重做",
+        cut: "剪切",
+        copy: "拷贝",
+        paste: "粘贴",
+        selectAll: "全选",
+        view: "视图",
+        theme: "主题",
+        followSystem: "跟随系统",
+        light: "明亮",
+        dark: "暗黑",
+        language: "语言",
+        help: "帮助",
+        pluginsMarket: "插件市场…"
+    )
+
+    static func forLanguage(_ language: AppLanguage) -> MenuStrings {
+        language.resolved == .zh ? .chinese : .english
+    }
+}
+
 // MARK: - Command-line parsing
 
 /// Resolved runtime settings, derived from CLI arguments and the environment.
@@ -814,6 +904,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private let updateManager = DSHUpdateManager()
     private var updateCheckInFlight = false
 
+    // MARK: Theme & language preferences (persisted in UserDefaults)
+
+    private var preferredTheme: Theme {
+        get { Theme(rawValue: UserDefaults.standard.integer(forKey: "appTheme")) ?? .system }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "appTheme") }
+    }
+
+    private var preferredLanguage: AppLanguage {
+        get { AppLanguage(rawValue: UserDefaults.standard.integer(forKey: "appLanguage")) ?? .system }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: "appLanguage") }
+    }
+
+    /// The menu strings for the currently effective language.
+    private var uiStrings: MenuStrings { MenuStrings.forLanguage(preferredLanguage) }
+
+    /// Apply the stored theme to the app, the window, and the webview so the
+    /// native chrome and the web content's prefers-color-scheme follow it.
+    private func applyTheme() {
+        let appearance: NSAppearance?
+        switch preferredTheme {
+        case .light: appearance = NSAppearance(named: .aqua)
+        case .dark: appearance = NSAppearance(named: .darkAqua)
+        case .system: appearance = nil
+        }
+        NSApp.appearance = appearance
+        window?.appearance = appearance
+        webView?.appearance = appearance
+    }
+
+    /// A checkable menu item used for radio groups (theme / language).
+    private func radioItem(_ title: String, action: Selector, tag: Int, selected: Bool) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.tag = tag
+        item.state = selected ? .on : .off
+        return item
+    }
+
+    /// Menu action: switch the UI theme.
+    @objc private func setTheme(_ sender: NSMenuItem) {
+        preferredTheme = Theme(rawValue: sender.tag) ?? .system
+        applyTheme()
+        buildMenu()
+    }
+
+    /// Menu action: switch the menu language.
+    @objc private func setLanguage(_ sender: NSMenuItem) {
+        preferredLanguage = AppLanguage(rawValue: sender.tag) ?? .system
+        buildMenu()
+    }
+
     init(settings: Settings) {
         self.settings = settings
         self.server = ServerManager(settings: settings)
@@ -821,6 +961,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        applyTheme()
         buildMenu()
         buildWindow()
         ensureNodeRuntime()
@@ -1013,6 +1154,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             self.window = win
             NSApp.activate(ignoringOtherApps: true)
 
+            // Re-apply the theme now that the window/webview exist so the web
+            // content's prefers-color-scheme and the native chrome match.
+            self.applyTheme()
+
             // Show a loading overlay over the (still-empty) webview so the
             // user isn't staring at a blank window while the server starts.
             self.showLoadingOverlay(over: container)
@@ -1167,9 +1312,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return true
     }
 
-    /// Install a minimal main menu with the standard Edit shortcuts so that
-    /// Cmd+C/X/V/A work through the responder chain and the app menu bar.
+    /// Install the main menu with the standard Edit shortcuts, plus View >
+    /// Theme / Language settings. Labels follow the chosen menu language.
     private func buildMenu() {
+        let s = uiStrings
         let mainMenu = NSMenu()
 
         // Application menu (Quit).
@@ -1178,13 +1324,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let appMenu = NSMenu()
         let appName = ProcessInfo.processInfo.processName
         appMenu.addItem(
-            withTitle: "Check for Updates…",
+            withTitle: s.checkForUpdates,
             action: #selector(checkForUpdates(_:)),
             keyEquivalent: ""
         )
         appMenu.addItem(.separator())
         appMenu.addItem(
-            withTitle: "Quit \(appName)",
+            withTitle: String(format: s.quitFormat, appName),
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
@@ -1193,46 +1339,74 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         // Edit menu (copy/paste/cut/select-all/undo/redo).
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
-        let editMenu = NSMenu(title: "Edit")
+        let editMenu = NSMenu(title: s.edit)
         editMenu.addItem(
-            withTitle: "Undo",
+            withTitle: s.undo,
             action: Selector(("undo:")),
             keyEquivalent: "z"
         )
         editMenu.addItem(
-            withTitle: "Redo",
+            withTitle: s.redo,
             action: Selector(("redo:")),
             keyEquivalent: "Z"
         )
         editMenu.addItem(.separator())
         editMenu.addItem(
-            withTitle: "Cut",
+            withTitle: s.cut,
             action: #selector(NSText.cut(_:)),
             keyEquivalent: "x"
         )
         editMenu.addItem(
-            withTitle: "Copy",
+            withTitle: s.copy,
             action: #selector(NSText.copy(_:)),
             keyEquivalent: "c"
         )
         editMenu.addItem(
-            withTitle: "Paste",
+            withTitle: s.paste,
             action: #selector(NSText.paste(_:)),
             keyEquivalent: "v"
         )
         editMenu.addItem(
-            withTitle: "Select All",
+            withTitle: s.selectAll,
             action: #selector(NSText.selectAll(_:)),
             keyEquivalent: "a"
         )
         editMenuItem.submenu = editMenu
 
+        // View menu: theme + language settings.
+        let viewMenuItem = NSMenuItem()
+        mainMenu.addItem(viewMenuItem)
+        let viewMenu = NSMenu(title: s.view)
+
+        let themeTitle = NSMenuItem(title: s.theme, action: nil, keyEquivalent: "")
+        let themeMenu = NSMenu(title: s.theme)
+        themeMenu.addItem(radioItem(s.followSystem, action: #selector(setTheme(_:)),
+                                    tag: Theme.system.rawValue, selected: preferredTheme == .system))
+        themeMenu.addItem(radioItem(s.light, action: #selector(setTheme(_:)),
+                                    tag: Theme.light.rawValue, selected: preferredTheme == .light))
+        themeMenu.addItem(radioItem(s.dark, action: #selector(setTheme(_:)),
+                                    tag: Theme.dark.rawValue, selected: preferredTheme == .dark))
+        themeTitle.submenu = themeMenu
+        viewMenu.addItem(themeTitle)
+
+        // Language items always show each language's native name.
+        let langTitle = NSMenuItem(title: s.language, action: nil, keyEquivalent: "")
+        let langMenu = NSMenu(title: s.language)
+        langMenu.addItem(radioItem("简体中文", action: #selector(setLanguage(_:)),
+                                   tag: AppLanguage.zh.rawValue, selected: preferredLanguage.resolved == .zh))
+        langMenu.addItem(radioItem("English", action: #selector(setLanguage(_:)),
+                                   tag: AppLanguage.en.rawValue, selected: preferredLanguage.resolved == .en))
+        langTitle.submenu = langMenu
+        viewMenu.addItem(langTitle)
+
+        viewMenuItem.submenu = viewMenu
+
         // Help menu (external links / documentation).
         let helpMenuItem = NSMenuItem()
         mainMenu.addItem(helpMenuItem)
-        let helpMenu = NSMenu(title: "Help")
+        let helpMenu = NSMenu(title: s.help)
         helpMenu.addItem(
-            withTitle: "Plugins Market…",
+            withTitle: s.pluginsMarket,
             action: #selector(openPluginsMarket(_:)),
             keyEquivalent: ""
         )
