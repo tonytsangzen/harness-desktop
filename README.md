@@ -8,6 +8,7 @@ Currently supported platforms:
 | --- | --- | --- |
 | macOS | Swift (`WKWebView`) | WebKit |
 | Windows | Native C++ (Win32 + WebView2 COM) | WebView2 (system) |
+| Linux | Native C++ (GTK3 + WebKitGTK) | WebKitGTK (system) |
 
 Both shells follow the same behavior contract and are developed separately (their only shared ground is the launch command, port selection, update check, and mirror-based runtime download — each implemented natively per platform).
 
@@ -32,6 +33,17 @@ Licensed under the [MIT License](LICENSE).
 | Target | Windows 10 1809+ |
 | Runtime | Native C++ (MSVC, statically linked) — single ~0.5 MB exe |
 | Installers | portable exe + WiX MSI, per architecture |
+
+### Linux
+
+| | |
+| --- | --- |
+| Display name | DeepSeek Harness |
+| Executable | `dshwebview` |
+| Architectures | x86_64 |
+| Target | Ubuntu 22.04+ (any distro with WebKitGTK 4.1) |
+| Runtime | Native C++ (GTK3 + WebKitGTK, system libraries) |
+| Installers | portable tarball + `.deb`, per release |
 
 ## Install (end users)
 
@@ -79,6 +91,25 @@ CPU architecture (`x64` for Intel/AMD 64-bit, `arm64` for ARM-based devices):
 - **Portable exe** — `DSHWebView-<version>-x64.exe` (or `-arm64.exe`). No
   installation required; run it directly. WebView2 Evergreen Runtime is the only
   dependency (preinstalled on Windows 11 and with Edge).
+
+### Linux
+
+Download the latest release from GitHub Releases:
+
+- **`.deb` package** — `deepseek-harness_<version>_amd64.deb`. Installs
+  `dshwebview` to `/usr/bin` plus a desktop entry and icon:
+
+  ```sh
+  sudo apt install ./deepseek-harness_<version>_amd64.deb
+  ```
+
+- **Portable tarball** — `DeepSeek Harness-<version>-linux-x86_64.tar.gz`.
+  Extract and run `./dshwebview` directly; no installation required.
+
+Runtime dependencies (installed on virtually every desktop distro): GTK 3,
+WebKitGTK 4.1, libsoup 3. **Node.js 18+ with npx is required** at runtime —
+the app spawns `npx @deepseek-ai/dsh web` (it does not bundle Node; install via
+your package manager: `sudo apt install nodejs npm`, or use nvm).
 
 ## Requirements (building macOS shell)
 
@@ -139,6 +170,7 @@ On launch the app:
 6. Opens external links and new-window requests (`target="_blank"`, `window.open`) in the **system default browser**; only pages served by the local dsh server navigate inside the webview.
 7. Provides a **Plugins Market…** item under the **Help** menu that opens the plugins market (https://tonytsangzen.github.io/harness-market/) in the default browser.
 8. Offers theme and language settings under the **View** menu: theme follows the system by default with **Light**/**Dark** overrides (affects the native chrome and the web content's `prefers-color-scheme`), and the menu language follows the system locale by default with **简体中文**/**English** overrides. Both persist across launches.
+9. Provides an **Enter/Exit Full Screen** item (⌃⌘F) under the **View** menu.
 
 The first launch downloads `@deepseek-ai/dsh` via npx, so startup can take a while.
 
@@ -208,6 +240,8 @@ shell's behavior:
    also darkens the title bar and the WebView2 color scheme), and the menu
    language follows the system locale by default with **简体中文**/**English**
    overrides. Both persist across launches (HKCU registry).
+9. Provides a **Full Screen** toggle in the window menu bar (borderless,
+   fills the monitor; checkmark reflects the state).
 
 ### Build (Windows)
 
@@ -245,12 +279,67 @@ The only runtime dependency is the **Microsoft Edge WebView2 Evergreen Runtime**
 WebView2 installer). No elevation or other tooling is required on a clean
 Windows machine.
 
+## Linux (build & behavior)
+
+The Linux shell lives in [`linux/`](linux/) and is a **native C++ (GTK3)
+app that hosts WebKitGTK** — the same engine that powers GNOME Web, so the
+webview comes from the system. It reproduces the macOS/Windows shells'
+behavior:
+
+1. Requires **Node.js 18+ with npx** on `PATH` (no auto-install on Linux — a
+   clear dialog with install instructions is shown when missing).
+2. Spawns `npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080` as a child in
+   its own process group; stdout/stderr are captured to
+   `~/.cache/deepseek-harness/dsh-server.log(.err)`.
+3. Polls the server until it accepts connections (up to 180 s), then loads the
+   served page in the WebKitWebView. A spinner overlay covers startup.
+   Downloads from the page show a **Save As dialog** (defaulting to
+   `~/Downloads`) and are tracked in a bottom progress bar.
+4. Terminates the whole child process tree on window close (process group).
+5. Checks for `@deepseek-ai/dsh` updates against the npm registry on launch and
+   offers to refresh the npx cache and restart the server.
+6. Opens external links and new-window requests (`target="_blank"`,
+   `window.open`) in the **system default browser** (`xdg-open` via GIO); only
+   pages served by the local dsh server navigate inside the webview.
+7. Provides a **Plugins Market** item in the menu bar that opens the plugins
+   market (https://tonytsangzen.github.io/harness-market/) in the default
+   browser.
+8. Offers **Edit** (undo/redo/cut/copy/paste/select-all with the standard
+   Ctrl+ shortcuts), **Theme**, and **Language** menus: theme follows the
+   system by default with **Light**/**Dark** overrides (applies the GTK dark
+   variant and the WebKitGTK preferred color scheme, affecting
+   `prefers-color-scheme`), and the menu language follows the system locale by
+   default with **简体中文**/**English** overrides. Both persist across launches
+   (`~/.config/deepseek-harness/settings.conf`).
+9. Provides a **Full Screen** toggle in the menu bar (checkmark reflects the
+   state).
+
+### Build (Linux)
+
+Requires CMake ≥ 3.16, Ninja, pkg-config, and the WebKitGTK 4.1 development
+headers (Ubuntu 22.04+):
+
+```sh
+sudo apt install cmake ninja-build pkg-config \
+  libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
+cmake -S linux -B linux/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build linux/build
+./linux/build/dshwebview
+```
+
+The [release workflow](.github/workflows/release-linux.yml) builds on
+`ubuntu-22.04` and publishes a portable tarball plus a `.deb` package
+(`deepseek-harness_<version>_amd64.deb`, installing `dshwebview`,
+`/usr/share/applications/deepseek-harness.desktop`, and the icon).
+
 ## Release
 
 The macOS shell publishes a DMG via the [release workflow](.github/workflows/release.yml);
 the Windows shell publishes, for **x64 and arm64**, a portable exe plus a WiX MSI
-installer via [release-windows.yml](.github/workflows/release-windows.yml). Both
-trigger on a `v*` tag (or manual dispatch) and attach to the same GitHub Release.
+installer via [release-windows.yml](.github/workflows/release-windows.yml); the
+Linux shell publishes a portable tarball plus a `.deb` package via
+[release-linux.yml](.github/workflows/release-linux.yml). All three trigger on a
+`v*` tag (or manual dispatch) and attach to the same GitHub Release.
 
 ## Project layout
 
@@ -277,6 +366,19 @@ trigger on a `v*` tag (or manual dispatch) and attach to the same GitHub Release
 │       ├── dsh_update_manager.cpp    npm registry version check / npx refresh
 │       ├── http.cpp          WinHTTP GET (string / to-file with progress)
 │       └── json.cpp          Minimal JSON parser (npm/node metadata)
+├── linux/                    Linux shell (native C++ / GTK3 / WebKitGTK)
+│   ├── CMakeLists.txt        CMake build (pkg-config: webkit2gtk-4.1, gtk+-3.0, libsoup-3.0)
+│   ├── resources/
+│   │   ├── deepseek-harness.svg      App icon (installed to hicolor)
+│   │   └── deepseek-harness.desktop  Desktop entry for the .deb
+│   └── src/
+│       ├── main.cpp          main: settings, GTK init, main loop
+│       ├── main_window.cpp   GTK window, menu bar (theme/language/full screen/plugins market),
+│       │                     WebKitWebView wiring, external links, downloads, overlay
+│       ├── settings.cpp      CLI/env parsing (mirrors macOS/Windows)
+│       ├── server_manager.cpp  spawn dsh web (process group), port probe/poll, log files
+│       ├── update_manager.cpp  npm registry version check (libsoup3)
+│       └── util.cpp          env, config dir, file helpers, version compare
 ├── Info.plist                macOS bundle configuration
 ├── AppIcon.icns              macOS application icon (committed)
 ├── AppIcon.ico               Windows application icon (committed, embedded via `windows/resources.rc`)
@@ -284,6 +386,7 @@ trigger on a `v*` tag (or manual dispatch) and attach to the same GitHub Release
 ├── .github/workflows/
 │   ├── release.yml           CI: macOS build, DMG, release
 │   ├── release-windows.yml   CI: x64+arm64 exe & MSI, release
+│   └── release-linux.yml     CI: Linux tarball & .deb, release
 └── scripts/
     ├── setup.sh               macOS one-shot toolchain installer
     ├── create-dmg.sh          macOS DMG packaging

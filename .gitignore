@@ -4,6 +4,9 @@
 # Build output
 dist/
 *.dmg
+linux/build*/
+windows/build-*/
+windows/build/
 
 # macOS
 .DS_Store

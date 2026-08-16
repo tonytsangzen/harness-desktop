@@ -52,6 +52,10 @@ private:
     Theme theme_ = Theme::System;
     Lang lang_ = Lang::System;
 
+    bool fullScreen_ = false;
+    LONG_PTR savedStyle_ = 0;
+    WINDOWPLACEMENT savedPlacement_{};
+
     DownloadInfo download_;
 
     static LRESULT CALLBACK StaticWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -71,6 +75,7 @@ private:
     void SetLang(Lang lang);
     void ApplyTheme(); // window chrome + overlay + webview color scheme
     void ApplyWebViewTheme();
+    void ToggleFullScreen();
 
     // Overlay / download bar controls.
     void ShowOverlay();

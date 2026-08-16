@@ -5,7 +5,16 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.0.8] - 2026-08-16
+
+### 新增
+
+- **Linux 移植**：新增 `linux/` 原生壳（C++ + GTK3 + WebKitGTK 4.1，系统 WebView），功能与 macOS/Windows 对齐 —— 主题（跟随系统/明亮/暗黑）、菜单多语言（跟随系统/简体中文/English，持久化到 `~/.config/deepseek-harness/settings.conf`）、全屏、编辑快捷键、外部链接走系统默认浏览器、下载另存为 + 进度条、npm 版本检查、插件市场。新增 `.github/workflows/release-linux.yml`，随 `v*` tag 发布便携 tarball + `.deb` 包。
+- 全屏模式菜单项（macOS + Windows）：macOS 视图菜单新增「进入/退出全屏」（⌃⌘F，标题随窗口状态切换）；Windows 菜单栏新增「全屏」开关（无边框铺满显示器，可勾选）。
+
+### 修复
+
+- 语言菜单缺少「跟随系统」选项（macOS + Windows）：手动切换语言后无法恢复跟随系统，现与主题菜单一致，提供 跟随系统 / 简体中文 / English 三项。
 
 ## [1.0.7] - 2026-08-16
 

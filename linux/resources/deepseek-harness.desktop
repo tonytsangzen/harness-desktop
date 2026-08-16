@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=DeepSeek Harness
+Name[zh_CN]=DeepSeek Harness
+GenericName=DeepSeek Harness Web UI
+Comment=Desktop shell for the DeepSeek Harness web UI
+Comment[zh_CN]=DeepSeek Harness Web 界面桌面壳
+Exec=dshwebview
+Icon=deepseek-harness
+Terminal=false
+Categories=Development;Utility;Network;
+StartupNotify=true

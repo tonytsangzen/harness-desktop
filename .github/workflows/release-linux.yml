@@ -1,0 +1,118 @@
+# Builds the Linux shell (GTK3 + WebKitGTK) and publishes a portable tarball
+# plus a .deb package. Triggers on a v* tag (attaches both artifacts to the
+# GitHub Release) or on manual dispatch (artifacts only).
+name: release-linux
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Linux (x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build pkg-config \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
+
+      - name: Configure (Ninja, Release)
+        run: cmake -S linux -B linux/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build linux/build
+
+      - name: Resolve version (from tag or default)
+        id: version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if [ -z "$v" ]; then v='1.0.0'; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Stage portable tarball
+        run: |
+          ver="${{ steps.version.outputs.version }}"
+          dir="staging/DeepSeek Harness-$ver-linux-x86_64"
+          mkdir -p "$dir"
+          cp linux/build/dshwebview "$dir/"
+          cp linux/resources/deepseek-harness.svg "$dir/"
+          cp linux/resources/deepseek-harness.desktop "$dir/"
+          printf '%s\n' \
+            'DeepSeek Harness - Linux (x86_64)' \
+            '' \
+            'Run: ./dshwebview' \
+            'Dependencies: libwebkit2gtk-4.1-0, libgtk-3-0, libsoup-3.0-0, Node.js 18+ (with npx).' \
+            'For a desktop integration, install the .deb package instead.' > "$dir/README.txt"
+          tar -C staging -czf "staging/DeepSeek Harness-$ver-linux-x86_64.tar.gz" \
+            "DeepSeek Harness-$ver-linux-x86_64"
+          rm -rf "$dir"
+
+      - name: Build .deb package
+        run: |
+          ver="${{ steps.version.outputs.version }}"
+          pkg="staging/deepseek-harness_${ver}_amd64"
+          mkdir -p "$pkg/DEBIAN"
+          mkdir -p "$pkg/usr/bin"
+          mkdir -p "$pkg/usr/share/applications"
+          mkdir -p "$pkg/usr/share/icons/hicolor/scalable/apps"
+          cat > "$pkg/DEBIAN/control" <<EOF
+          Package: deepseek-harness
+          Version: ${ver}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Tony Tsang <tonytsangzen@gmail.com>
+          Depends: libwebkit2gtk-4.1-0 (>= 2.36), libgtk-3-0 (>= 3.24), libsoup-3.0-0
+          Description: DeepSeek Harness desktop shell
+           Native desktop shell (WebKitGTK) for the DeepSeek Harness web UI.
+           Spawns 'npx @deepseek-ai/dsh web' and renders it in a system webview.
+          EOF
+          cp linux/build/dshwebview "$pkg/usr/bin/dshwebview"
+          cp linux/resources/deepseek-harness.desktop "$pkg/usr/share/applications/"
+          cp linux/resources/deepseek-harness.svg \
+            "$pkg/usr/share/icons/hicolor/scalable/apps/"
+          dpkg-deb --build --root-owner-group "$pkg"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-linux-x64
+          path: |
+            staging/*.tar.gz
+            staging/*.deb
+          if-no-files-found: error
+
+  publish:
+    name: Attach assets to release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Attach tarball + deb to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          mapfile -t assets < <(find artifacts -type f -print | sort)
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --generate-notes
+          fi

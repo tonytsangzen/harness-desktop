@@ -55,6 +55,8 @@ const UINT_PTR kIDM_ThemeLight = 40003;
 const UINT_PTR kIDM_ThemeDark = 40004;
 const UINT_PTR kIDM_LangZh = 40005;
 const UINT_PTR kIDM_LangEn = 40006;
+const UINT_PTR kIDM_LangSystem = 40007;
+const UINT_PTR kIDM_FullScreen = 40008;
 
 const COLORREF kOverlayBg = RGB(0xFF, 0xFF, 0xFF);
 const COLORREF kOverlayText = RGB(0x20, 0x20, 0x20);
@@ -473,15 +475,24 @@ void MainWindow::RebuildMenu() {
                 kIDM_ThemeDark, zh ? L"暗黑" : L"Dark");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(themeMenu), zh ? L"主题" : L"Theme");
 
-    // Language popup: each option shows its native name.
+    // Language popup: follow system (labeled in the current menu language)
+    // plus each language under its native name. Checked state mirrors the
+    // explicit preference so "follow system" stays restorable.
     HMENU langMenu = CreatePopupMenu();
-    bool zhActive = IsChinese();
-    AppendMenuW(langMenu, MF_STRING | (zhActive ? MF_CHECKED : 0), kIDM_LangZh, L"简体中文");
-    AppendMenuW(langMenu, MF_STRING | (!zhActive ? MF_CHECKED : 0), kIDM_LangEn, L"English");
+    AppendMenuW(langMenu, MF_STRING | (lang_ == Lang::System ? MF_CHECKED : 0),
+                kIDM_LangSystem, zh ? L"跟随系统" : L"Follow System");
+    AppendMenuW(langMenu, MF_STRING | (lang_ == Lang::Zh ? MF_CHECKED : 0),
+                kIDM_LangZh, L"简体中文");
+    AppendMenuW(langMenu, MF_STRING | (lang_ == Lang::En ? MF_CHECKED : 0),
+                kIDM_LangEn, L"English");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(langMenu), zh ? L"语言" : L"Language");
 
     // Plugins Market.
     AppendMenuW(menu, MF_STRING, kIDM_PluginsMarket, zh ? L"插件市场" : L"Plugins Market");
+
+    // Full screen toggle (checkable).
+    AppendMenuW(menu, MF_STRING | (fullScreen_ ? MF_CHECKED : 0),
+                kIDM_FullScreen, zh ? L"全屏" : L"Full Screen");
 
     HMENU old = menu_;
     menu_ = menu;
@@ -544,6 +555,37 @@ void MainWindow::ApplyWebViewTheme() {
             bg.R = 0xFF; bg.G = 0xFF; bg.B = 0xFF;
         }
         controller2->put_DefaultBackgroundColor(bg);
+    }
+}
+
+// Toggle between the normal framed window and a borderless full-screen window
+// covering the monitor. The saved placement/style restore the original state.
+void MainWindow::ToggleFullScreen() {
+    if (!hwnd_) return;
+    if (fullScreen_) {
+        SetWindowLongPtrW(hwnd_, GWL_STYLE, savedStyle_);
+        SetWindowPlacement(hwnd_, &savedPlacement_);
+        SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+        fullScreen_ = false;
+    } else {
+        savedPlacement_.length = sizeof(WINDOWPLACEMENT);
+        GetWindowPlacement(hwnd_, &savedPlacement_);
+        savedStyle_ = GetWindowLongPtrW(hwnd_, GWL_STYLE);
+        MONITORINFO mi{ sizeof(mi) };
+        HMONITOR mon = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY);
+        if (mon && GetMonitorInfoW(mon, &mi)) {
+            SetWindowLongPtrW(hwnd_, GWL_STYLE, savedStyle_ & ~(WS_CAPTION | WS_THICKFRAME));
+            SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                         mi.rcMonitor.right - mi.rcMonitor.left,
+                         mi.rcMonitor.bottom - mi.rcMonitor.top,
+                         SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            fullScreen_ = true;
+        }
+    }
+    // Keep the menu item's checkmark in sync.
+    if (menu_) {
+        CheckMenuItem(menu_, kIDM_FullScreen, fullScreen_ ? MF_CHECKED : MF_UNCHECKED);
     }
 }
 
@@ -1118,6 +1160,8 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
                 case kIDM_ThemeDark: SetTheme(Theme::Dark); return 0;
                 case kIDM_LangZh: SetLang(Lang::Zh); return 0;
                 case kIDM_LangEn: SetLang(Lang::En); return 0;
+                case kIDM_LangSystem: SetLang(Lang::System); return 0;
+                case kIDM_FullScreen: ToggleFullScreen(); return 0;
             }
             return 0;
         case WM_GETMINMAXINFO: {

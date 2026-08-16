@@ -54,6 +54,8 @@ struct MenuStrings {
     let light: String
     let dark: String
     let language: String
+    let enterFullScreen: String
+    let exitFullScreen: String
     let help: String
     let pluginsMarket: String
 
@@ -73,6 +75,8 @@ struct MenuStrings {
         light: "Light",
         dark: "Dark",
         language: "Language",
+        enterFullScreen: "Enter Full Screen",
+        exitFullScreen: "Exit Full Screen",
         help: "Help",
         pluginsMarket: "Plugins Market…"
     )
@@ -93,6 +97,8 @@ struct MenuStrings {
         light: "明亮",
         dark: "暗黑",
         language: "语言",
+        enterFullScreen: "进入全屏",
+        exitFullScreen: "退出全屏",
         help: "帮助",
         pluginsMarket: "插件市场…"
     )
@@ -1389,15 +1395,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         themeTitle.submenu = themeMenu
         viewMenu.addItem(themeTitle)
 
-        // Language items always show each language's native name.
+        // Language submenu: follow system (labeled in the current menu
+        // language) plus each language under its native name. The checked
+        // state mirrors the explicit preference so "follow system" stays a
+        // distinct, restorable choice.
         let langTitle = NSMenuItem(title: s.language, action: nil, keyEquivalent: "")
         let langMenu = NSMenu(title: s.language)
+        langMenu.addItem(radioItem(s.followSystem, action: #selector(setLanguage(_:)),
+                                   tag: AppLanguage.system.rawValue, selected: preferredLanguage == .system))
         langMenu.addItem(radioItem("简体中文", action: #selector(setLanguage(_:)),
-                                   tag: AppLanguage.zh.rawValue, selected: preferredLanguage.resolved == .zh))
+                                   tag: AppLanguage.zh.rawValue, selected: preferredLanguage == .zh))
         langMenu.addItem(radioItem("English", action: #selector(setLanguage(_:)),
-                                   tag: AppLanguage.en.rawValue, selected: preferredLanguage.resolved == .en))
+                                   tag: AppLanguage.en.rawValue, selected: preferredLanguage == .en))
         langTitle.submenu = langMenu
         viewMenu.addItem(langTitle)
+
+        // Standard full-screen toggle (⌃⌘F); the title switches between
+        // "Enter Full Screen" and "Exit Full Screen" via validateMenuItem.
+        viewMenu.addItem(.separator())
+        let fullScreenItem = NSMenuItem(title: s.enterFullScreen,
+                                        action: #selector(NSWindow.toggleFullScreen(_:)),
+                                        keyEquivalent: "f")
+        fullScreenItem.keyEquivalentModifierMask = [.control, .command]
+        viewMenu.addItem(fullScreenItem)
 
         viewMenuItem.submenu = viewMenu
 
@@ -1627,6 +1647,17 @@ extension AppDelegate {
             return
         }
         NSWorkspace.shared.open(url)
+    }
+}
+
+extension AppDelegate: NSMenuItemValidation {
+    /// Keep the full-screen menu item's title in sync with the window state
+    /// and disable it while no window exists (e.g. during provisioning).
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(NSWindow.toggleFullScreen(_:)) else { return true }
+        guard let window = window else { return false }
+        menuItem.title = window.styleMask.contains(.fullScreen) ? uiStrings.exitFullScreen : uiStrings.enterFullScreen
+        return true
     }
 }
 
