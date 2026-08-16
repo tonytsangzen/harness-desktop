@@ -330,12 +330,13 @@ cmake --build linux/build
 ./linux/build/dshwebview
 ```
 
-The [release workflow](.github/workflows/release-linux.yml) builds on native
-runners for **x86_64** (ubuntu-22.04, WebKitGTK 2.36 baseline) and **arm64**
-(ubuntu-24.04-arm) and publishes, per architecture, a portable tarball plus a
-`.deb` package (`deepseek-harness_<version>_amd64.deb` / `_arm64.deb`,
-installing `dshwebview`, `/usr/share/applications/deepseek-harness.desktop`,
-and the icon).
+The [release workflow](.github/workflows/release-linux.yml) builds **x86_64**
+natively and **arm64** cross-compiled (aarch64 toolchain), both on
+ubuntu-22.04 so the artifacts share the same glibc baseline and run on
+Ubuntu 22.04+ / Debian 12+. It publishes, per architecture, a portable
+tarball plus a `.deb` package (`deepseek-harness_<version>_amd64.deb` /
+`_arm64.deb`, installing `dshwebview`,
+`/usr/share/applications/deepseek-harness.desktop`, and the icon).
 
 ## Release
 
