@@ -1,5 +1,6 @@
 #include "main_window.h"
 
+#include "node_runtime_manager.h"
 #include "server_manager.h"
 #include "settings.h"
 #include "update_manager.h"
@@ -107,6 +108,62 @@ void RemoveTree(const std::string& path) {
     GFile* file = g_file_new_for_path(path.c_str());
     g_file_delete(file, nullptr, nullptr);
     g_object_unref(file);
+}
+
+// ---- auto-install of a missing Node.js runtime ----
+
+struct NodeInstallCtx {
+    MainWindow* self;
+    GtkWidget* dialog; // guarded by a weak pointer (NULL once destroyed)
+    GtkWidget* progressBar;
+    GtkWidget* label;
+    gint result = 0; // 1 = installed, 0 = failed (set before the done idle)
+};
+
+struct NodeInstallProgress {
+    NodeInstallCtx* ctx;
+    NodeRuntimeManager::State state;
+    double fraction;
+};
+
+gboolean OnNodeInstallProgressIdle(gpointer data) {
+    auto* p = static_cast<NodeInstallProgress*>(data);
+    NodeInstallCtx* ctx = p->ctx;
+    if (p->state == NodeRuntimeManager::State::Downloading) {
+        if (p->fraction >= 0) {
+            char buf[160];
+            int percent = static_cast<int>(p->fraction * 100 + 0.5);
+            snprintf(buf, sizeof(buf),
+                     "正在下载 Node.js（%d%%）… / Downloading Node.js (%d%%)…",
+                     percent, percent);
+            gtk_label_set_text(GTK_LABEL(ctx->label), buf);
+            gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ctx->progressBar), p->fraction);
+        } else {
+            gtk_label_set_text(GTK_LABEL(ctx->label),
+                               "正在下载 Node.js… / Downloading Node.js…");
+            gtk_progress_bar_pulse(GTK_PROGRESS_BAR(ctx->progressBar));
+        }
+    } else if (p->state == NodeRuntimeManager::State::Installing) {
+        gtk_label_set_text(GTK_LABEL(ctx->label),
+                           "正在安装 Node.js… / Installing Node.js…");
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ctx->progressBar), 1.0);
+        gtk_progress_bar_set_text(GTK_PROGRESS_BAR(ctx->progressBar), "");
+    }
+    delete p;
+    return G_SOURCE_REMOVE;
+}
+
+// Sole owner of ctx after the worker finishes: reports the outcome through
+// the dialog (if it is still alive) and frees ctx. If the user closed the
+// dialog early, ctx->dialog is NULL (weak pointer) and only ctx is freed.
+gboolean OnNodeInstallDoneIdle(gpointer data) {
+    auto* ctx = static_cast<NodeInstallCtx*>(data);
+    if (ctx->dialog) {
+        gtk_dialog_response(GTK_DIALOG(ctx->dialog),
+                            ctx->result ? GTK_RESPONSE_OK : GTK_RESPONSE_REJECT);
+    }
+    delete ctx;
+    return G_SOURCE_REMOVE;
 }
 
 } // namespace
@@ -498,15 +555,68 @@ void MainWindow::OnServerFailed() {
     SetLoadingOverlay(false);
     std::string missing;
     if (!ServerManager::NodeAvailable(&missing)) {
-        ShowError("未找到 Node.js 运行时。\n\n请先安装 Node.js 18+（含 npm/npx）：\n"
+        // No node/npx anywhere: install a user-level runtime automatically
+        // (mirrors macOS/Windows; no root needed).
+        StartNodeAutoInstall();
+        return;
+    }
+    ShowError("DeepSeek Harness 服务启动失败。\n\n请查看日志：\n" +
+              ServerManager::LogPath() +
+              "\n\nFailed to start the DeepSeek Harness server. See the log file above.");
+}
+
+void MainWindow::StartNodeAutoInstall() {
+    if (nodeInstalling_) return;
+    nodeInstalling_ = true;
+
+    GtkWidget* dialog = gtk_dialog_new();
+    gtk_window_set_title(GTK_WINDOW(dialog), "DeepSeek Harness");
+    gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(window_));
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+    gtk_window_set_resizable(GTK_WINDOW(dialog), FALSE);
+    GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    GtkWidget* label =
+        gtk_label_new("正在准备 Node.js 运行时… / Preparing the Node.js runtime…");
+    GtkWidget* bar = gtk_progress_bar_new();
+    gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(bar), TRUE);
+    gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(bar), 0.0);
+    gtk_box_pack_start(GTK_BOX(content), label, FALSE, FALSE, 10);
+    gtk_box_pack_start(GTK_BOX(content), bar, FALSE, FALSE, 10);
+    gtk_widget_show_all(dialog);
+
+    auto* ctx = new NodeInstallCtx{this, dialog, bar, label};
+    g_object_add_weak_pointer(G_OBJECT(dialog), reinterpret_cast<gpointer*>(&ctx->dialog));
+    g_thread_unref(g_thread_new("node-install", NodeInstallThread, ctx));
+
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    nodeInstalling_ = false;
+
+    if (response == GTK_RESPONSE_OK) {
+        // The runtime is installed and on PATH now — start the server again.
+        NodeRuntimeManager::EnsureOnPath();
+        ServerManager::Start();
+        serverReady_ = false;
+        pollStartedUs_ = g_get_monotonic_time();
+        g_timeout_add(250, OnPollServer, this);
+    } else {
+        ShowError("自动安装 Node.js 失败。\n\n请检查网络后重试，或手动安装：\n"
                   "  sudo apt install nodejs npm\n"
                   "或使用 nvm：https://github.com/nvm-sh/nvm\n\n"
-                  "Missing Node.js runtime. Install Node.js 18+ (with npm/npx) first.");
-    } else {
-        ShowError("DeepSeek Harness 服务启动失败。\n\n请查看日志：\n" +
-                  ServerManager::LogPath() +
-                  "\n\nFailed to start the DeepSeek Harness server. See the log file above.");
+                  "Automatic Node.js install failed. Check your network and retry, "
+                  "or install Node.js 18+ (with npm/npx) manually.");
     }
+}
+
+gpointer MainWindow::NodeInstallThread(gpointer userData) {
+    auto* ctx = static_cast<NodeInstallCtx*>(userData);
+    bool ok = NodeRuntimeManager::Provide([ctx](NodeRuntimeManager::State state, double fraction) {
+        auto* p = new NodeInstallProgress{ctx, state, fraction};
+        g_idle_add(OnNodeInstallProgressIdle, p);
+    });
+    ctx->result = ok ? 1 : 0;
+    g_idle_add(OnNodeInstallDoneIdle, ctx);
+    return nullptr;
 }
 
 // ---- update check ---------------------------------------------------------------

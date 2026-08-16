@@ -18,6 +18,7 @@ add_executable(dshwebview
     src/util.cpp
     src/server_manager.cpp
     src/update_manager.cpp
+    src/node_runtime_manager.cpp
     src/main_window.cpp
 )
 

@@ -46,6 +46,7 @@ private:
     bool togglingFullscreen_ = false;
     bool serverReady_ = false;
     bool updateChecked_ = false;
+    bool nodeInstalling_ = false;
     gint64 pollStartedUs_ = 0;
     std::string lastExternalOpened_; // dedupe identical external-open requests
     gint64 lastExternalOpenedUs_ = 0;
@@ -73,6 +74,10 @@ private:
     static gboolean OnPollServer(gpointer userData);
     void OnServerReady();
     void OnServerFailed();
+
+    // ---- node runtime auto-install ----
+    void StartNodeAutoInstall();
+    static gpointer NodeInstallThread(gpointer userData);
 
     // ---- update check ----
     void CheckForUpdates();

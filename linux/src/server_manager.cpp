@@ -1,5 +1,6 @@
 #include "server_manager.h"
 
+#include "node_runtime_manager.h"
 #include "settings.h"
 #include "util.h"
 
@@ -7,6 +8,7 @@
 
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -40,8 +42,7 @@ void Initialize(const Settings& settings) {
 }
 
 bool NodeAvailable(std::string* missingTool) {
-    if (g_find_program_in_path("npx")) return true;
-    if (g_find_program_in_path("node")) return true;
+    if (NodeRuntimeManager::RuntimeAvailable()) return true;
     if (missingTool) *missingTool = "node/npx";
     return false;
 }
@@ -91,6 +92,9 @@ bool Start() {
     if (!g_settings) return false;
     if (g_running) return true;
 
+    // Make the auto-installed runtime visible to execvp before checking.
+    NodeRuntimeManager::EnsureOnPath();
+
     std::string missing;
     if (!NodeAvailable(&missing)) {
         g_printerr("dshwebview: node/npx not found on PATH (%s)\n", missing.c_str());
@@ -125,6 +129,8 @@ bool Start() {
     if (pid == 0) {
         // Child: own process group + stdio → log files.
         setpgid(0, 0);
+        // Point npm at the right registry (China mirror) before npx runs.
+        setenv("npm_config_registry", NodeRuntimeManager::NpmRegistryUrl().c_str(), 1);
         int out = open(logPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         int err = open(logErr.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (out >= 0) { dup2(out, STDOUT_FILENO); close(out); }

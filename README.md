@@ -110,9 +110,10 @@ CPU architecture (`x86_64` for Intel/AMD 64-bit, `aarch64` for ARM64):
   installation required.
 
 Runtime dependencies (installed on virtually every desktop distro): GTK 3,
-WebKitGTK 4.1, libsoup 3. **Node.js 18+ with npx is required** at runtime —
-the app spawns `npx @deepseek-ai/dsh web` (it does not bundle Node; install via
-your package manager: `sudo apt install nodejs npm`, or use nvm).
+WebKitGTK 4.1, libsoup 3. **Node.js is required** at runtime — the app spawns
+`npx @deepseek-ai/dsh web` — but if it is missing the shell downloads and
+installs the latest LTS automatically (user-level, no root), like the
+macOS/Windows shells.
 
 ## Requirements (building macOS shell)
 
@@ -289,8 +290,11 @@ app that hosts WebKitGTK** — the same engine that powers GNOME Web, so the
 webview comes from the system. It reproduces the macOS/Windows shells'
 behavior:
 
-1. Requires **Node.js 18+ with npx** on `PATH` (no auto-install on Linux — a
-   clear dialog with install instructions is shown when missing).
+1. Detects `node`/`npx` (on `PATH` or in the managed install dir). When
+   missing, it **auto-installs the latest LTS Node.js** to
+   `~/.local/share/deepseek-harness/nodejs` (no root needed; mirrors
+   macOS/Windows) with a progress dialog, then continues — a manual install
+   dialog is only shown if the automatic install fails.
 2. Spawns `npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080` as a child in
    its own process group; stdout/stderr are captured to
    `~/.cache/deepseek-harness/dsh-server.log(.err)`.
@@ -387,6 +391,7 @@ collects every artifact and attaches it to the Release.
 │       ├── settings.cpp      CLI/env parsing (mirrors macOS/Windows)
 │       ├── server_manager.cpp  spawn dsh web (process group), port probe/poll, log files
 │       ├── update_manager.cpp  npm registry version check (libsoup3)
+│       ├── node_runtime_manager.cpp  auto-install Node.js LTS (download + tar.xz + PATH)
 │       └── util.cpp          env, config dir, file helpers, version compare
 ├── Info.plist                macOS bundle configuration
 ├── AppIcon.icns              macOS application icon (committed)

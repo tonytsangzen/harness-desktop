@@ -13,6 +13,10 @@ void EnsureDir(const std::string& path);
 // The settings directory (~/.config/deepseek-harness).
 std::string ConfigDir();
 
+// The user data directory (XDG_DATA_HOME or ~/.local/share; no trailing
+// "deepseek-harness" component).
+std::string GetDataDir();
+
 // Reads the whole file as text (empty string on failure).
 std::string ReadFileText(const std::string& path);
 

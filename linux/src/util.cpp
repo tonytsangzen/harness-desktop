@@ -30,6 +30,16 @@ std::string ConfigDir() {
     return dir;
 }
 
+std::string GetDataDir() {
+    std::string base = GetEnv("XDG_DATA_HOME");
+    if (base.empty()) {
+        base = GetEnv("HOME");
+        if (!base.empty()) base += "/.local/share";
+    }
+    if (base.empty()) base = "/tmp";
+    return base;
+}
+
 std::string ReadFileText(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return {};
