@@ -51,10 +51,10 @@ jobs:
               sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
             fi
             sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<'EOF'
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse
-EOF
+            deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse
+            deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
+            deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse
+            EOF
             sudo apt-get update
             sudo apt-get install -y \
               crossbuild-essential-arm64 \
