@@ -1,6 +1,7 @@
-# Builds the Linux shell (GTK3 + WebKitGTK) and publishes a portable tarball
-# plus a .deb package. Triggers on a v* tag (attaches both artifacts to the
-# GitHub Release) or on manual dispatch (artifacts only).
+# Builds the Linux shell (GTK3 + WebKitGTK) for x86_64 and arm64, and publishes
+# a portable tarball plus a .deb package per architecture. Triggers on a v* tag
+# (attaches all four artifacts to the GitHub Release) or on manual dispatch
+# (artifacts only).
 name: release-linux
 
 on:
@@ -14,8 +15,24 @@ permissions:
 
 jobs:
   build:
-    name: Build Linux (x86_64)
-    runs-on: ubuntu-22.04
+    name: Build Linux (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x64 keeps the ubuntu-22.04 baseline (WebKitGTK 2.36) so the oldest
+          # supported distro is always covered by CI.
+          - name: x64
+            runner: ubuntu-22.04
+            arch: amd64
+            tarname: x86_64
+          # arm64 runs on GitHub's native arm64 runner (ubuntu-24.04-arm,
+          # WebKitGTK 2.44).
+          - name: arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+            tarname: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -23,7 +40,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            cmake ninja-build pkg-config \
+            cmake ninja-build pkg-config g++ \
             libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
 
       - name: Configure (Ninja, Release)
@@ -42,25 +59,25 @@ jobs:
       - name: Stage portable tarball
         run: |
           ver="${{ steps.version.outputs.version }}"
-          dir="staging/DeepSeek Harness-$ver-linux-x86_64"
+          dir="staging/DeepSeek Harness-$ver-linux-${{ matrix.tarname }}"
           mkdir -p "$dir"
           cp linux/build/dshwebview "$dir/"
           cp linux/resources/deepseek-harness.svg "$dir/"
           cp linux/resources/deepseek-harness.desktop "$dir/"
           printf '%s\n' \
-            'DeepSeek Harness - Linux (x86_64)' \
+            'DeepSeek Harness - Linux (${{ matrix.tarname }})' \
             '' \
             'Run: ./dshwebview' \
             'Dependencies: libwebkit2gtk-4.1-0, libgtk-3-0, libsoup-3.0-0, Node.js 18+ (with npx).' \
             'For a desktop integration, install the .deb package instead.' > "$dir/README.txt"
-          tar -C staging -czf "staging/DeepSeek Harness-$ver-linux-x86_64.tar.gz" \
-            "DeepSeek Harness-$ver-linux-x86_64"
+          tar -C staging -czf "staging/DeepSeek Harness-$ver-linux-${{ matrix.tarname }}.tar.gz" \
+            "DeepSeek Harness-$ver-linux-${{ matrix.tarname }}"
           rm -rf "$dir"
 
       - name: Build .deb package
         run: |
           ver="${{ steps.version.outputs.version }}"
-          pkg="staging/deepseek-harness_${ver}_amd64"
+          pkg="staging/deepseek-harness_${ver}_${{ matrix.arch }}"
           mkdir -p "$pkg/DEBIAN"
           mkdir -p "$pkg/usr/bin"
           mkdir -p "$pkg/usr/share/applications"
@@ -70,7 +87,7 @@ jobs:
           Version: ${ver}
           Section: utils
           Priority: optional
-          Architecture: amd64
+          Architecture: ${{ matrix.arch }}
           Maintainer: Tony Tsang <tonytsangzen@gmail.com>
           Depends: libwebkit2gtk-4.1-0 (>= 2.36), libgtk-3-0 (>= 3.24), libsoup-3.0-0
           Description: DeepSeek Harness desktop shell
@@ -86,7 +103,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-linux-x64
+          name: dsh-linux-${{ matrix.name }}
           path: |
             staging/*.tar.gz
             staging/*.deb
@@ -104,7 +121,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Attach tarball + deb to the release
+      - name: Attach tarballs + debs to the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

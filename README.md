@@ -40,7 +40,7 @@ Licensed under the [MIT License](LICENSE).
 | --- | --- |
 | Display name | DeepSeek Harness |
 | Executable | `dshwebview` |
-| Architectures | x86_64 |
+| Architectures | x86_64, arm64 |
 | Target | Ubuntu 22.04+ (any distro with WebKitGTK 4.1) |
 | Runtime | Native C++ (GTK3 + WebKitGTK, system libraries) |
 | Installers | portable tarball + `.deb`, per release |
@@ -94,17 +94,20 @@ CPU architecture (`x64` for Intel/AMD 64-bit, `arm64` for ARM-based devices):
 
 ### Linux
 
-Download the latest release from GitHub Releases:
+Download the latest release from GitHub Releases and pick the file matching your
+CPU architecture (`x86_64` for Intel/AMD 64-bit, `aarch64` for ARM64):
 
-- **`.deb` package** — `deepseek-harness_<version>_amd64.deb`. Installs
-  `dshwebview` to `/usr/bin` plus a desktop entry and icon:
+- **`.deb` package** — `deepseek-harness_<version>_amd64.deb` (or
+  `_arm64.deb`). Installs `dshwebview` to `/usr/bin` plus a desktop entry and
+  icon:
 
   ```sh
   sudo apt install ./deepseek-harness_<version>_amd64.deb
   ```
 
-- **Portable tarball** — `DeepSeek Harness-<version>-linux-x86_64.tar.gz`.
-  Extract and run `./dshwebview` directly; no installation required.
+- **Portable tarball** — `DeepSeek Harness-<version>-linux-x86_64.tar.gz`
+  (or `-linux-aarch64.tar.gz`). Extract and run `./dshwebview` directly; no
+  installation required.
 
 Runtime dependencies (installed on virtually every desktop distro): GTK 3,
 WebKitGTK 4.1, libsoup 3. **Node.js 18+ with npx is required** at runtime —
@@ -327,10 +330,12 @@ cmake --build linux/build
 ./linux/build/dshwebview
 ```
 
-The [release workflow](.github/workflows/release-linux.yml) builds on
-`ubuntu-22.04` and publishes a portable tarball plus a `.deb` package
-(`deepseek-harness_<version>_amd64.deb`, installing `dshwebview`,
-`/usr/share/applications/deepseek-harness.desktop`, and the icon).
+The [release workflow](.github/workflows/release-linux.yml) builds on native
+runners for **x86_64** (ubuntu-22.04, WebKitGTK 2.36 baseline) and **arm64**
+(ubuntu-24.04-arm) and publishes, per architecture, a portable tarball plus a
+`.deb` package (`deepseek-harness_<version>_amd64.deb` / `_arm64.deb`,
+installing `dshwebview`, `/usr/share/applications/deepseek-harness.desktop`,
+and the icon).
 
 ## Release
 
