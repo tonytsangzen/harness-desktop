@@ -1050,6 +1050,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         let webView = ShortcutWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         self.webView = webView
     }
 
@@ -1079,18 +1080,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     // MARK: - Web download support
 
-    /// Intercept navigation actions that explicitly request a download (for
-    /// example `<a download>` anchors, which the Session ZIP export uses).
+    /// Intercept navigation actions: anything that isn't served by the local
+    /// dsh server (external links, target="_blank" / window.open requests) is
+    /// handed to the system default browser instead of navigating the webview
+    /// away from the harness UI. Downloads are routed to WKDownload as before.
     func webView(_ webView: WKWebView,
                  decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        let url = navigationAction.request.url
         NSLog("DSHWebView navigationAction: url=%@ shouldPerformDownload=%@",
-              navigationAction.request.url?.absoluteString ?? "nil",
+              url?.absoluteString ?? "nil",
               String(describing: navigationAction.shouldPerformDownload))
+
+        // External URLs open in the default browser. New-window navigations
+        // (targetFrame == nil) are caught here as a fallback for cases the
+        // WKUIDelegate.createWebViewWith path does not cover.
+        if let url = url, !isAppURL(url) {
+            openInDefaultBrowser(url)
+            decisionHandler(.cancel)
+            return
+        }
+        if navigationAction.targetFrame == nil {
+            decisionHandler(.cancel)
+            return
+        }
+
         // macOS 11+: WKNavigationAction.shouldPerformDownload is set when the
         // web content asks the browser to download rather than navigate.
         if #available(macOS 11.3, *), navigationAction.shouldPerformDownload {
-            pendingSuggestedFilename = navigationAction.request.url?.lastPathComponent ?? "download"
+            pendingSuggestedFilename = url?.lastPathComponent ?? "download"
             decisionHandler(.download)
             return
         }
@@ -1209,6 +1227,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         )
         editMenuItem.submenu = editMenu
 
+        // Help menu (external links / documentation).
+        let helpMenuItem = NSMenuItem()
+        mainMenu.addItem(helpMenuItem)
+        let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(
+            withTitle: "Plugins Market…",
+            action: #selector(openPluginsMarket(_:)),
+            keyEquivalent: ""
+        )
+        helpMenuItem.submenu = helpMenu
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -1218,6 +1247,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     // MARK: - Update checking
+
+    /// Menu action: open the plugins market in the system default browser.
+    @objc private func openPluginsMarket(_ sender: Any?) {
+        guard let url = URL(string: "https://tonytsangzen.github.io/harness-market/") else { return }
+        openInDefaultBrowser(url)
+    }
 
     /// Called once on launch (in the background) to check for a newer dsh
     /// version without blocking startup.
@@ -1375,6 +1410,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+}
+
+// MARK: - External links: open in the system default browser
+
+extension AppDelegate: WKUIDelegate {
+    /// New-window requests (target="_blank" links, window.open) never create a
+    /// second webview; the URL is opened in the system default browser instead.
+    func webView(_ webView: WKWebView,
+                 createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url {
+            openInDefaultBrowser(url)
+        }
+        return nil
+    }
+}
+
+extension AppDelegate {
+    /// True when `url` points at the local dsh server — the only content the
+    /// webview is meant to host. Everything else belongs to the default browser.
+    private func isAppURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return false
+        }
+        guard let host = url.host?.lowercased() else { return false }
+        let appHost = settings.host.lowercased()
+        let sameHost = host == appHost
+            || (appHost == "127.0.0.1" && host == "localhost")
+            || (appHost == "localhost" && host == "127.0.0.1")
+        // The app URL always carries an explicit port; a URL without one is
+        // not ours (this also cleanly rejects lookalikes like 127.0.0.1:30800).
+        guard sameHost, let port = url.port else { return false }
+        return port == server.activePort
+    }
+
+    /// Open a URL in the system default browser (http/https only).
+    private func openInDefaultBrowser(_ url: URL) {
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 }
 

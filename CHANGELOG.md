@@ -7,8 +7,12 @@
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-08-16
+
 ### 新增
 
+- 菜单新增 **Plugins Market** 选项（macOS：Help 菜单；Windows：窗口菜单栏）：点击后在系统默认浏览器打开 https://tonytsangzen.github.io/harness-market/。
+- 外部链接/新窗口支持（macOS + Windows）：点击 `target="_blank"`、`window.open` 或跳转到本地 dsh 服务器以外的 URL 时，自动用系统默认浏览器打开；仅本地服务器页面在 WebView 内导航。
 - Windows 页面内下载支持（对齐 macOS）：注入 JS 拦截 `<a download>` 点击，绕过引擎对程序化下载（无用户手势）的拦截，改为 WinHTTP 原生下载；弹「另存为」对话框选择保存位置（默认 Downloads），底部进度条显示进度，失败弹错误对话框。
 - Windows 应用图标：提交的 `AppIcon.ico` 通过 `resources.rc` 嵌入 exe，并用作窗口类图标（Explorer、任务栏、标题栏）。
 - Windows 双架构发布：GitHub Actions（`release-windows.yml`）产出 **x64 与 arm64** 的便携 exe 与 WiX MSI 安装包（`windows/installer/DSHWebView.wxs`），推送 `v*` 标签自动附加到 Release。

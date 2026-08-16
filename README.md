@@ -136,6 +136,8 @@ On launch the app:
 3. Polls the server until it accepts connections (up to 180 s).
 4. Loads the served page in the `WKWebView` and shows the window.
 5. Terminates the child process when the last window closes.
+6. Opens external links and new-window requests (`target="_blank"`, `window.open`) in the **system default browser**; only pages served by the local dsh server navigate inside the webview.
+7. Provides a **Plugins Market…** item under the **Help** menu that opens the plugins market (https://tonytsangzen.github.io/harness-market/) in the default browser.
 
 The first launch downloads `@deepseek-ai/dsh` via npx, so startup can take a while.
 
@@ -194,6 +196,12 @@ shell's behavior:
 4. Terminates the whole child process tree on window close (Job Object).
 5. Checks for `@deepseek-ai/dsh` updates against the npm registry on launch and
    offers to refresh the npx cache.
+6. Opens external links and new-window requests (`target="_blank"`,
+   `window.open`) in the **system default browser**; only pages served by the
+   local dsh server navigate inside the webview.
+7. Provides a **Plugins Market** item in the window menu bar that opens the
+   plugins market (https://tonytsangzen.github.io/harness-market/) in the
+   default browser.
 
 ### Build (Windows)
 

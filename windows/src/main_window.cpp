@@ -16,6 +16,7 @@
 
 #include <shlobj.h>
 #include <shobjidl.h>
+#include <shellapi.h>
 
 #include <cmath>
 #include <memory>
@@ -46,6 +47,7 @@ const UINT kWM_DownloadFailed = WM_APP + 10;
 
 const UINT_PTR kSpinnerTimer = 1;
 const int kDownloadBarHeight = 48;
+const UINT_PTR kIDM_PluginsMarket = 40001;
 
 const COLORREF kOverlayBg = RGB(0xFF, 0xFF, 0xFF);
 const COLORREF kOverlayText = RGB(0x20, 0x20, 0x20);
@@ -125,6 +127,37 @@ struct NativeDownloadJob {
     std::wstring targetPath;  // final path chosen in the Save As dialog
     std::wstring filename;    // display name for the progress bar
 };
+
+// True when `uri` points at the local dsh server — the only content the webview
+// is meant to host. Everything else belongs to the system default browser.
+bool IsAppUrl(const std::wstring& uri) {
+    std::wstring appUrl = ServerManager::Url(); // e.g. http://127.0.0.1:3080/
+    // Strip the trailing slash so a bare "http://127.0.0.1:3080" also matches.
+    if (!appUrl.empty() && appUrl.back() == L'/') appUrl.pop_back();
+    if (uri.size() < appUrl.size() ||
+        _wcsnicmp(uri.c_str(), appUrl.c_str(), appUrl.size()) != 0) {
+        return false;
+    }
+    // The remainder must be empty or start with '/', '?' or '#' — this rejects
+    // lookalikes such as http://127.0.0.1:30800/... while accepting /path,
+    // ?query and #fragment URLs on the app origin.
+    if (uri.size() == appUrl.size()) return true;
+    wchar_t next = uri[appUrl.size()];
+    return next == L'/' || next == L'?' || next == L'#';
+}
+
+bool IsHttpUrl(const std::wstring& uri) {
+    return (uri.size() >= 8 && _wcsnicmp(uri.c_str(), L"https://", 8) == 0) ||
+           (uri.size() >= 7 && _wcsnicmp(uri.c_str(), L"http://", 7) == 0);
+}
+
+// Opens `uri` in the system default browser. Returns true when the browser
+// accepted the URL (ShellExecuteW reports success as a value > 32).
+bool OpenInDefaultBrowser(const std::wstring& uri) {
+    if (!IsHttpUrl(uri)) return false;
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", uri.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(result) > 32;
+}
 
 } // namespace
 
@@ -330,8 +363,13 @@ bool MainWindow::Create(HINSTANCE instance, const std::wstring& title) {
     downloadWc.lpszClassName = L"DSHWebViewDownloadBar";
     RegisterClassExW(&downloadWc);
 
+    // Window menu bar: "Plugins Market" opens the plugins site in the system
+    // default browser.
+    HMENU menu = CreateMenu();
+    AppendMenuW(menu, MF_STRING, kIDM_PluginsMarket, L"Plugins Market");
+
     hwnd_ = CreateWindowExW(0, L"DSHWebViewMainWindow", title.c_str(), WS_OVERLAPPEDWINDOW,
-                            CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, nullptr, nullptr, instance, nullptr);
+                            CW_USEDEFAULT, CW_USEDEFAULT, 1280, 800, nullptr, menu, instance, nullptr);
     return hwnd_ != nullptr;
 }
 
@@ -543,14 +581,44 @@ void MainWindow::WireEvents() {
             })
             .Get(), &navToken);
 
+    // New-window requests (target="_blank" links, window.open) never spawn a
+    // second webview window; the URL is opened in the system default browser.
     EventRegistrationToken newWindowToken{};
     g_core->add_NewWindowRequested(
         Callback<ICoreWebView2NewWindowRequestedEventHandler>(
             [](ICoreWebView2* /*sender*/, ICoreWebView2NewWindowRequestedEventArgs* args) -> HRESULT {
+                LPWSTR uri = nullptr;
+                if (SUCCEEDED(args->get_Uri(&uri)) && uri) {
+                    std::wstring url(uri);
+                    CoTaskMemFree(uri);
+                    OpenInDefaultBrowser(url);
+                }
                 args->put_Handled(TRUE);
                 return S_OK;
             })
             .Get(), &newWindowToken);
+
+    // Navigations away from the local dsh server (external links) are handed
+    // to the default browser instead of replacing the harness UI. Downloads of
+    // external files go with them (the browser handles those); anything served
+    // by the dsh server itself — including its downloads — is left untouched.
+    EventRegistrationToken navStartingToken{};
+    g_core->add_NavigationStarting(
+        Callback<ICoreWebView2NavigationStartingEventHandler>(
+            [](ICoreWebView2* /*sender*/, ICoreWebView2NavigationStartingEventArgs* args) -> HRESULT {
+                LPWSTR uri = nullptr;
+                if (FAILED(args->get_Uri(&uri))) return S_OK;
+                std::wstring url(uri ? uri : L"");
+                if (uri) CoTaskMemFree(uri);
+                if (url.empty() || IsAppUrl(url)) return S_OK;
+                // Cancel the webview navigation and let the browser take it —
+                // but only when a browser is actually available to receive it.
+                if (OpenInDefaultBrowser(url)) {
+                    args->put_Cancel(TRUE);
+                }
+                return S_OK;
+            })
+            .Get(), &navStartingToken);
 
     // Downloads forwarded by the in-page interceptor (programmatic
     // <a download> clicks outside user activation, e.g. the Session ZIP
@@ -880,6 +948,12 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         case kWM_UpdateAvailable: OnUpdateAvailable(reinterpret_cast<std::wstring*>(lParam)); return 0;
         case kWM_UpdateFinished: OnUpdateFinished(wParam != 0); return 0;
         case kWM_DownloadFailed: OnDownloadFailed(reinterpret_cast<std::wstring*>(lParam)); return 0;
+        case WM_COMMAND:
+            if (LOWORD(wParam) == kIDM_PluginsMarket) {
+                OpenInDefaultBrowser(L"https://tonytsangzen.github.io/harness-market/");
+                return 0;
+            }
+            return 0;
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
             mmi->ptMinTrackSize.x = 640;
