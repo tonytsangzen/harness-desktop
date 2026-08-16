@@ -23,10 +23,16 @@ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
-# Let pkg_check_modules resolve the arm64 .pc files and prefix their paths
-# with the sysroot, regardless of the caller's environment. PKG_CONFIG_LIBDIR
-# must include /usr/share/pkgconfig too: arch-independent .pc files (e.g.
-# xproto.pc from x11proto-core-dev) live there, and --exists walks the whole
-# dependency tree — without them the lookup fails with "Package not found".
+# Let pkg_check_modules resolve the arm64 .pc files regardless of the caller's
+# environment. PKG_CONFIG_LIBDIR must include /usr/share/pkgconfig too:
+# arch-independent .pc files (e.g. xproto.pc from x11proto-core-dev) live
+# there, and --exists walks the whole dependency tree — without them the
+# lookup fails with "Package not found".
+#
+# Note: no PKG_CONFIG_SYSROOT_DIR here. The arm64 dev packages are native
+# multiarch packages installed on the host (/usr/lib/aarch64-linux-gnu), and
+# gcc's --sysroot does not redirect explicit -I/-L arguments, so pkg-config
+# must emit the real host paths: headers come from the shared /usr/include
+# tree, arch-specific bits (glibconfig.h) and libraries from
+# /usr/lib/aarch64-linux-gnu.
 set(ENV{PKG_CONFIG_LIBDIR} "/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig")
-set(ENV{PKG_CONFIG_SYSROOT_DIR} "/usr/aarch64-linux-gnu")
