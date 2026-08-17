@@ -22,6 +22,7 @@
 #include <gdiplus.h>
 #include <wincrypt.h>
 #include <iphlpapi.h>
+#include <iptypes.h>
 
 #include <shlobj.h>
 #include <shobjidl.h>

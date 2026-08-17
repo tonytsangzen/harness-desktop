@@ -75,7 +75,7 @@ bool LooksLikeDshWeb(const std::string& host, unsigned short port) {
     if (error == nullptr && stream != nullptr) {
         guint status = soup_message_get_status(msg);
         SoupMessageHeaders* hdrs = soup_message_get_response_headers(msg);
-        const char* ctype = hdrs ? soup_message_headers_get_content_type(hdrs) : nullptr;
+        const char* ctype = hdrs ? soup_message_headers_get_content_type(hdrs, nullptr) : nullptr;
         ok = status == 200 && ctype && g_strrstr(ctype, "text/html") != nullptr;
     }
     if (stream) g_object_unref(stream);

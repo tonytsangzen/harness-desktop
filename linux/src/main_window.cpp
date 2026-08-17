@@ -1019,6 +1019,8 @@ void MainWindow::OnEditActivate(GtkWidget* item, gpointer userData) {
 namespace {
 
 // 13-digit random device ID derived from device info (hostname + machine-id),
+// stable across launches so reconnects reuse the same host identity.
+std::string DeviceID() {
     std::string seed = g_get_host_name();
     if (g_file_test("/etc/machine-id", G_FILE_TEST_IS_REGULAR)) {
         gchar* contents = nullptr;
