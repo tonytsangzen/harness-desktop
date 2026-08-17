@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="connection_channel_name">远程连接</string>
+    <string name="connection_notif_title">DeepSeek Harness</string>
+    <string name="connection_notif_text">远程连接中…</string>
+</resources>

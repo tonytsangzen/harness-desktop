@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/app_state.dart';
+import '../core/foreground_service.dart';
 import '../core/lan_backend.dart';
 import '../core/p2p_client.dart';
 import '../core/tunnel_backend.dart';
@@ -41,6 +42,9 @@ class _WebviewPageState extends State<WebviewPage> {
   }
 
   Future<void> _bootstrap() async {
+    // Keep the tunnel alive when the UI goes to the background (foreground
+    // service on Android); stop it again when the page is disposed.
+    await ForegroundService.start();
     final lan = widget.state.currentConnection?.lan;
     if (lan != null && await AppState.lanAvailable(lan)) {
       _lanMode = true;
@@ -145,6 +149,7 @@ class _WebviewPageState extends State<WebviewPage> {
 
   @override
   void dispose() {
+    ForegroundService.stop();
     _proxy?.close();
     _lanBackend?.dispose();
     _p2p?.dispose();
