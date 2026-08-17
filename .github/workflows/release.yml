@@ -35,11 +35,13 @@ jobs:
         id: version
         run: |
           # Prefer the tag ref (e.g. refs/tags/v1.0.1 -> 1.0.1); fall back to
-          # a run number for manual dispatch.
+          # a run number for manual dispatch. The fallback must stay WiX-legal
+          # (major<256, minor<256, build<65536) so MSI builds also pass on
+          # dispatch.
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/v}"
           else
-            VERSION="$(date +%Y%m%d).${GITHUB_RUN_NUMBER}"
+            VERSION="0.1.$(( ${GITHUB_RUN_NUMBER} % 60000 ))"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${VERSION}"
@@ -93,11 +95,11 @@ jobs:
         shell: pwsh
         run: |
           # Prefer the tag ref (refs/tags/v1.0.1 -> 1.0.1); fall back to a
-          # run number for manual dispatch (GITHUB_REF_NAME would be "main").
+          # WiX-legal run-number version for manual dispatch.
           if ($env:GITHUB_REF -like 'refs/tags/v*') {
             $v = $env:GITHUB_REF.Substring(11)
           } else {
-            $v = "$(Get-Date -Format yyyyMMdd).$env:GITHUB_RUN_NUMBER"
+            $v = "0.1." + ($env:GITHUB_RUN_NUMBER % 60000)
           }
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$v"
 
@@ -233,11 +235,12 @@ jobs:
         id: version
         run: |
           # Prefer the tag ref (refs/tags/v1.0.1 -> 1.0.1); fall back to a
-          # run number for manual dispatch (GITHUB_REF_NAME would be "main").
+          # WiX-legal run-number version for manual dispatch (GITHUB_REF_NAME
+          # would be "main", and dpkg rejects non-numeric versions).
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             v="${GITHUB_REF#refs/tags/v}"
           else
-            v="$(date +%Y%m%d).${GITHUB_RUN_NUMBER}"
+            v="0.1.$(( ${GITHUB_RUN_NUMBER} % 60000 ))"
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
