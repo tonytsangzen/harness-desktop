@@ -455,6 +455,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
+          set -euo pipefail
           # Rename the mobile artifacts to versioned release names.
           tag="${GITHUB_REF_NAME#v}"
           mv artifacts/android-apk/app-release.apk "artifacts/dsh-mobile-${tag}.apk"
@@ -464,8 +465,16 @@ jobs:
           # directories are never passed to gh as upload paths, and exclude any
           # leftover .wixpdb debug-symbol files.
           mapfile -t assets < <(find artifacts -type f ! -name '*.wixpdb' -print | sort)
+          echo "ref=${GITHUB_REF_NAME} tag=${tag} assets=${#assets[@]}"
+          printf '  %s\n' "${assets[@]}"
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release exists — uploading assets"
             gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
           else
+            echo "release missing — creating it"
             gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --generate-notes
           fi
+          # Post-condition: the release must exist with all assets attached.
+          gh release view "${GITHUB_REF_NAME}" \
+            --json tagName,assets \
+            --jq '"verified " + .tagName + " assets=" + ((.assets|length)|tostring)'
