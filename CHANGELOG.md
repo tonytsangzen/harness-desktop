@@ -1,3 +1,10 @@
+## [1.1.5] - 2026-08-17
+
+### 修复
+
+- **手机端 "Failed to load plugins"**：插件 bundle（50–430KB）超过 WebRTC DataChannel 协商的 max-message-size（werift 默认 64KB），bridge 的 `dc.send` 抛 `max-message-size exceeded` 被吞掉，手机 30s 超时返回 502 → 前端渲染 "Failed to load plugins"。修复：bridge 对 >16KB 的 `http-reply` 拆成 `http-chunk` 分片，手机端按 `id` 收齐后拼接（`mobile/bridge/bridge.mjs`、`mobile/app/lib/core/p2p_client.dart`）。
+- **LAN 直连地址选错网卡**：配对二维码的 `lan=` 之前无条件优先 `192.168.*`，在有 VM 虚拟网卡（VMware/Parallels 桥接网卡）时会选中手机无法访问的地址，导致同 WiFi 下也退回中继/P2P。修复：三端统一改为优先「默认路由接口」——macOS 用 SystemConfiguration `PrimaryInterface`、Windows 用 `GetBestInterface`、Linux 用 `/proc/net/route`。
+
 ## [1.1.3] - 2026-08-17
 
 ### 修复

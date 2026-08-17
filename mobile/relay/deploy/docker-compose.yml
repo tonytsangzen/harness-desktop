@@ -11,7 +11,7 @@ services:
     restart: unless-stopped
     # 只暴露给本机 Caddy, 不直接对外
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8443:8443"
     # relay 为纯内存存储, 重启后需重新扫码配对
     # （如需持久化, 见 deploy/README.md 的"持久化"小节）
 

@@ -1,7 +1,7 @@
 # relay (dsh-mobile 中继) — 多阶段构建：golang 构建 + alpine 运行
 # 用法（在 mobile/relay 目录）:
 #   docker build -f deploy/Dockerfile -t dsh-relay .
-#   docker run -d -p 8080:8080 --name dsh-relay dsh-relay
+#   docker run -d -p 8443:8443 --name dsh-relay dsh-relay
 # 生产建议: 由 Caddy (deploy/Caddyfile) 或 cloudflared 提供 TLS/WSS。
 #
 # 国内网络拉取 Docker Hub 超时, 用镜像源覆盖基础镜像:
@@ -26,8 +26,8 @@ FROM ${RUN_IMAGE}
 RUN adduser -D -u 10001 relay
 USER relay
 COPY --from=build /relay /usr/local/bin/relay
-EXPOSE 8080
-# /healthz 由 main.go 提供；alpine wget 来自 busybox
+EXPOSE 8443
+# /healthz、/relay/healthz 由 main.go 提供（容器内直连用 /healthz）；alpine wget 来自 busybox
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
-  CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1
+  CMD wget -qO- http://127.0.0.1:8443/healthz >/dev/null || exit 1
 ENTRYPOINT ["relay"]

@@ -1,0 +1,46 @@
+# DeepSeek Harness 中继服务器 systemd 服务
+# 默认监听 8443（HTTP，TLS/WSS 由前面的 nginx 终止，见 nginx.conf）。
+#
+# 安装（Ubuntu/Debian，以 root 执行）:
+#   1) 构建并安装二进制:
+#        cd mobile/relay && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /usr/local/bin/relay .
+#   2) 创建运行用户（首次）:
+#        useradd --system --no-create-home --shell /usr/sbin/nologin relay
+#   3) 安装本服务并启用:
+#        install -m 644 deploy/relay.service /etc/systemd/system/relay.service
+#        systemctl daemon-reload
+#        systemctl enable --now relay
+#   4) 验证:
+#        curl http://127.0.0.1:8443/relay/healthz   # → ok
+#        journalctl -u relay -f
+#
+# 改端口: 修改 Environment=RELAY_ADDR 或 ExecStart 里的 -addr，
+#         systemctl daemon-reload && systemctl restart relay。
+#         同时把 nginx.conf 里的 proxy_pass 端口改成一致。
+
+[Unit]
+Description=DeepSeek Harness relay (WSS host/device tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+# 默认监听 8443；两种改法任选其一（-addr 优先于 RELAY_ADDR）：
+Environment=RELAY_ADDR=:8443
+ExecStart=/usr/local/bin/relay -addr :8443
+Restart=always
+RestartSec=3
+# 加固：relay 是纯内存无状态服务，无需写文件系统
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+# 简单限流，防止单个恶意连接打满 CPU（按需调整）
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

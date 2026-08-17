@@ -6,11 +6,11 @@
 
 relay.example.com {
 	# WebSocket 长连接: Caddy 自动升级 HTTP/1.1 -> WS, 无需特殊配置
-	reverse_proxy 127.0.0.1:8080
+	reverse_proxy 127.0.0.1:8443
 
 	# 健康检查可被公开轮询
 	handle /healthz {
-		reverse_proxy 127.0.0.1:8080
+		reverse_proxy 127.0.0.1:8443
 	}
 
 	# 给中继足够长的连接（默认即无超时, 这里显式声明）

@@ -1,8 +1,13 @@
 // E2E smoke test for the mobile relay (protocol spec docs/mobile-relay-protocol.md).
 // Simulates: Host register -> pair -> Device connect -> rpc round-trip -> sse flow.
-// Requires Node >= 22 (global WebSocket) and the relay on :8080.
-const BASE = "ws://127.0.0.1:8080/relay/v1";
-const HTTP = "http://127.0.0.1:8080/relay/v1";
+// Requires Node >= 22 (global WebSocket) and the relay on :8443.
+const BASE = "ws://127.0.0.1:8443/relay/v1";
+const HTTP = "http://127.0.0.1:8443/relay/v1";
+
+// --- 0. Health ---
+const hz = await fetch("http://127.0.0.1:8443/relay/healthz");
+ok(hz.status === 200 && (await hz.text()) === "ok", "relay/healthz ok");
+
 
 function fail(msg) {
   console.error("FAIL:", msg);

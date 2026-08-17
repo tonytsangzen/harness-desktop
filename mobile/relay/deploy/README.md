@@ -27,7 +27,7 @@ docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 - 手机端 relay 地址填：`https://relay.example.com`
-- 验证：`curl https://relay.example.com/healthz` → `ok`
+- 验证：`curl https://relay.example.com/relay/healthz` → `ok`（nginx 只反代 /relay/ 路径；`/healthz` 仅容器内/本机直连用）
 
 > 若大陆网络连不上 Let's Encrypt 的 http-01 验证（80 端口被封），改用 Caddy 的 DNS-01：
 > 在 Caddyfile 加 `tls { dns cloudflare <api_token> }`，并把 `80:80` 端口映射去掉。
@@ -79,12 +79,12 @@ sudo systemctl enable --now dsh-relay
 ./relay
 
 # 方式1: 快速隧道（无需域名配置, 域名随机）
-cloudflared tunnel --url http://127.0.0.1:8080
+cloudflared tunnel --url http://127.0.0.1:8443
 # -> 得到 https://xxxx.trycloudflare.com
 
 # 方式2: 固定域名（推荐, 手机端地址稳定）
 # 在 Cloudflare 面板 -> Zero Trust -> Networks -> Tunnels 创建隧道
-# Public Hostname: relay.example.com -> http://127.0.0.1:8080
+# Public Hostname: relay.example.com -> http://127.0.0.1:8443
 cloudflared tunnel run <tunnel-id>
 ```
 
@@ -118,6 +118,6 @@ cloudflared tunnel run <tunnel-id>
    想要持久化：给 relay 加一个 `--data /path/store.json`（可落盘），当前版本未实现，重启后用
    `pair/refresh` 无法恢复（token 也在内存），直接重新配对即可。
 2. **单实例**：relay 为单机内存 hub，不需要多副本；多个设备连同一个实例即可。
-3. **健康检查**：`/healthz` 返回 `ok`，供负载均衡/平台探活。
-4. **防火墙**：VPS 需放行 80/443（Docker 映射）；若只用 Caddy 反代则 8080 不必对外。
+3. **健康检查**：`/relay/healthz`（及本机直连 `/healthz`）返回 `ok`，供负载均衡/平台探活。
+4. **防火墙**：VPS 需放行 80/443（Docker 映射）；若只用 Caddy 反代则 8443 不必对外。
 5. **日志**：`docker compose logs -f relay`；日志里有 host/device 的注册、转发与断开记录，便于排障。

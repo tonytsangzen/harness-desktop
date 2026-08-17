@@ -395,17 +395,36 @@ async function handleSignal(frame) {
   }
 }
 
+// WebRTC data channels cap a single message at the negotiated max-message-size
+// (werift's default is 64 KiB, and libwebrtc typically advertises ≤256 KiB).
+// dsh plugin bundles are 50–430 KB (base64 ~68–570 KB), so an `http-reply` for
+// one of them exceeds the limit and werift's `dc.send` throws
+// "max-message-size exceeded". That throw used to be swallowed by the caller,
+// so the phone never got a reply, timed out after 30s, and the WebView failed
+// the bundle <script> → the shell rendered "Failed to load plugins". Chunk
+// large replies into ≤16 KiB base64 pieces the phone reassembles.
+const P2P_HTTP_CHUNK = 16000;
+
+function sendP2PHttpReply(id, resp) {
+  const body = resp.body || "";
+  const send = (frame) => p2p.dc.send(JSON.stringify(frame));
+  if (body.length <= P2P_HTTP_CHUNK) {
+    send({ type: "http-reply", id, status: resp.status, body: { headers: resp.headers, body } });
+    return;
+  }
+  const chunks = [];
+  for (let i = 0; i < body.length; i += P2P_HTTP_CHUNK) chunks.push(body.slice(i, i + P2P_HTTP_CHUNK));
+  send({ type: "http-reply", id, status: resp.status, chunked: true, total: chunks.length, body: { headers: resp.headers } });
+  for (let i = 0; i < chunks.length; i++) send({ type: "http-chunk", id, index: i, data: chunks[i] });
+}
+
 async function handleP2PMessage(text) {
   let msg;
   try { msg = JSON.parse(text); } catch { return; }
   if (!p2p?.dc || p2p.dc.readyState !== "open") return;
   if (msg.type === "http") {
     const resp = await proxyHttp(msg.method || "GET", msg.path, msg.headers, msg.body);
-    p2p.dc.send(JSON.stringify({
-      type: "http-reply", id: msg.id,
-      status: resp.status,
-      body: { headers: resp.headers, body: resp.body },
-    }));
+    sendP2PHttpReply(msg.id, resp);
   } else if (msg.type === "sse-open") {
     const wsUrl = DSH_BASE.replace(/^http/, "ws") + msg.path;
     let up;
@@ -419,7 +438,14 @@ async function handleP2PMessage(text) {
     p2p.sseStreams.set(msg.channel, stream);
     up.onmessage = (ev) => {
       if (p2p.dc && p2p.dc.readyState === "open") {
-        p2p.dc.send(JSON.stringify({ type: "sse-frame", channel: msg.channel, data: String(ev.data) }));
+        try {
+          p2p.dc.send(JSON.stringify({ type: "sse-frame", channel: msg.channel, data: String(ev.data) }));
+        } catch (err) {
+          // An event larger than the data-channel max-message-size can't be
+          // sent; drop it rather than crashing the bridge (the phone re-syncs
+          // on the next reload).
+          console.error(`[p2p] sse-frame dropped for ${msg.channel}: ${err?.message || err}`);
+        }
       }
     };
     up.onclose = () => { if (p2p.sseStreams.get(msg.channel) === stream) p2p.sseStreams.delete(msg.channel); };

@@ -15,7 +15,7 @@ class PairingPage extends StatefulWidget {
 }
 
 class _PairingPageState extends State<PairingPage> {
-  final _relay = TextEditingController(text: 'https://relay.example.com');
+  final _relay = TextEditingController(text: 'https://relay.deepvisus.top');
   final _pin = TextEditingController();
   bool _scanning = false;
   bool _fromQR = false; // relay address came from the QR code
@@ -24,7 +24,7 @@ class _PairingPageState extends State<PairingPage> {
 
   Future<void> _submit() async {
     if (_deviceId.isEmpty || _relay.text.isEmpty) {
-      _snack('请先扫码获得设备码，再输入 PIN');
+      _snack('请先扫码获得设备 ID，再输入 PIN');
       return;
     }
     final pin = _pin.text.trim();
@@ -57,7 +57,7 @@ class _PairingPageState extends State<PairingPage> {
     final uri = Uri.tryParse(raw);
     final device = uri?.queryParameters['device'];
     if (uri == null || device == null || device.isEmpty) {
-      _snack('二维码缺少设备码，请重新生成');
+      _snack('二维码缺少设备 ID，请重新生成');
       return;
     }
     // Use the scheme carried by the QR code (http for plaintext test relays);
@@ -76,7 +76,7 @@ class _PairingPageState extends State<PairingPage> {
       _lan = uri.queryParameters['lan'];
       _relay.text = '$scheme://${uri.authority}';
     });
-    _snack('已从二维码读取中继地址与设备码，请输入电脑上显示的 PIN 后确认');
+    _snack('已从二维码读取中继地址与设备 ID，请输入电脑上显示的 PIN 后确认');
   }
 
   void _snack(String msg) {
@@ -101,12 +101,6 @@ class _PairingPageState extends State<PairingPage> {
               children: [
                 const Text('1. 在电脑的 DeepSeek Harness 里打开「远程连接」，显示配对二维码和 PIN',
                     style: TextStyle(fontSize: 15)),
-                const SizedBox(height: 16),
-                FilledButton.icon(
-                  onPressed: () => setState(() => _scanning = true),
-                  icon: const Icon(Icons.qr_code_scanner),
-                  label: const Text('扫描二维码'),
-                ),
                 const SizedBox(height: 24),
                 TextField(
                   controller: _relay,
@@ -137,18 +131,32 @@ class _PairingPageState extends State<PairingPage> {
                     setState(() => _fromQR = false);
                   },
                   decoration: const InputDecoration(
-                      labelText: '设备码（扫码后自动填入，也可手动输入）',
+                      labelText: '设备 ID（扫码后自动填入，也可手动输入）',
                       border: OutlineInputBorder()),
                   keyboardType: TextInputType.number,
                 ),
                 const SizedBox(height: 24),
-                FilledButton(
-                  onPressed: widget.state.busy ? null : _submit,
-                  child: widget.state.busy
-                      ? const SizedBox(
-                          height: 20, width: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text('连接'),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: () => setState(() => _scanning = true),
+                        icon: const Icon(Icons.qr_code_scanner),
+                        label: const Text('扫描二维码'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: widget.state.busy ? null : _submit,
+                        child: widget.state.busy
+                            ? const SizedBox(
+                                height: 20, width: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2))
+                            : const Text('连接'),
+                      ),
+                    ),
+                  ],
                 ),
                 if (widget.state.error != null)
                   Padding(

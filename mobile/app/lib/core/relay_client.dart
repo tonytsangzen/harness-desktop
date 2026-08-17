@@ -36,7 +36,7 @@ class RelayClient implements TunnelBackend {
           Uri uri, {Map<String, dynamic>? headers}) =>
       IOWebSocketChannel.connect(uri, headers: headers);
 
-  /// Origin (https://relay.example.com); wss:// is derived.
+  /// Origin (https://relay.deepvisus.top); wss:// is derived.
   final String relayBase;
   final String sessionToken;
   final StreamChannel<dynamic> Function(Uri uri, {Map<String, dynamic>? headers})

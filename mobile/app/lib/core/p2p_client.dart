@@ -25,6 +25,10 @@ class P2pClient implements TunnelBackend {
   RTCDataChannel? _dc;
   int _seq = 0;
   final Map<String, Completer<Map<String, dynamic>>> _pending = {};
+  /// Buffers for large `http-reply` bodies split into `http-chunk` frames by
+  /// the bridge (WebRTC data channels cap a single message at the negotiated
+  /// max-message-size, which plugin bundles exceed).
+  final Map<String, _P2PHttpAssembly> _assemblies = {};
   final Map<String, ({void Function(String data) onData, void Function(String? reason)? onClose})>
       _sseHandlers = {};
   final List<void Function()> _unsubs = [];
@@ -109,6 +113,7 @@ class P2pClient implements TunnelBackend {
     }
     _unsubs.clear();
     _pending.clear();
+    _assemblies.clear();
     _sseHandlers.clear();
     try {
       _dc?.close();
@@ -162,6 +167,7 @@ class P2pClient implements TunnelBackend {
       );
     } catch (_) {
       _pending.remove(id);
+      _assemblies.remove(id);
       return (
         status: 502,
         headers: const <String, String>{},
@@ -202,9 +208,10 @@ class P2pClient implements TunnelBackend {
     }
     switch (f['type']) {
       case 'http-reply':
-        final id = f['id'] as String?;
-        final c = id == null ? null : _pending.remove(id);
-        if (c != null && !c.isCompleted) c.complete(f);
+        _onHttpReply(f);
+        break;
+      case 'http-chunk':
+        _onHttpChunk(f);
         break;
       case 'sse-frame':
         final ch = f['channel'] as String?;
@@ -221,4 +228,72 @@ class P2pClient implements TunnelBackend {
         break;
     }
   }
+
+  /// Handle an `http-reply` frame. A `chunked` reply only carries the status
+  /// and headers; its body arrives as subsequent `http-chunk` frames that
+  /// [_onHttpChunk] reassembles. Non-chunked replies complete immediately.
+  void _onHttpReply(Map<String, dynamic> f) {
+    final id = f['id'] as String?;
+    if (id == null) return;
+    if (f['chunked'] == true) {
+      final total = (f['total'] as num?)?.toInt() ?? 0;
+      final bodyMap = (f['body'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final headers = (bodyMap['headers'] as Map?)?.cast<String, String>() ?? const {};
+      if (total <= 1) {
+        // Degenerate: nothing to wait for — finish with whatever body we have.
+        final c = _pending.remove(id);
+        if (c != null && !c.isCompleted) {
+          c.complete({
+            'status': f['status'] as int? ?? 502,
+            'body': {'headers': headers, 'body': (bodyMap['body'] as String?) ?? ''},
+          });
+        }
+        return;
+      }
+      _assemblies[id] = _P2PHttpAssembly(
+        status: f['status'] as int? ?? 502,
+        headers: headers,
+        total: total,
+      );
+      return;
+    }
+    final c = _pending.remove(id);
+    if (c != null && !c.isCompleted) c.complete(f);
+  }
+
+  void _onHttpChunk(Map<String, dynamic> f) {
+    final id = f['id'] as String?;
+    final a = id == null ? null : _assemblies[id];
+    if (a == null) return;
+    final index = (f['index'] as num?)?.toInt() ?? -1;
+    final data = f['data'] as String? ?? '';
+    if (index < 0 || index >= a.total || a.parts[index] != null) return;
+    a.parts[index] = data;
+    a.received++;
+    if (a.received == a.total) {
+      _assemblies.remove(id);
+      final c = _pending.remove(id);
+      if (c != null && !c.isCompleted) {
+        c.complete({
+          'status': a.status,
+          'body': {'headers': a.headers, 'body': a.parts.join()},
+        });
+      }
+    }
+  }
+}
+
+/// Reassembly buffer for one chunked `http-reply` over the P2P data channel.
+class _P2PHttpAssembly {
+  _P2PHttpAssembly({
+    required this.status,
+    required this.headers,
+    required this.total,
+  }) : parts = List<String?>.filled(total, null);
+
+  final int status;
+  final Map<String, String> headers;
+  final int total;
+  final List<String?> parts;
+  int received = 0;
 }

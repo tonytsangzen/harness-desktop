@@ -96,7 +96,7 @@ private:
     GPid bridgePid_ = 0;
     GtkWidget* pairingDialog_ = nullptr;
     std::string bridgeBuffer_; // bridge stdout line accumulation
-    std::string mobileRelayUrl_;
+    std::string mobileRelayUrl_ = "https://relay.deepvisus.top";
     std::string deviceId_;
     std::string qrPNG_;
     bool registered_ = false;

@@ -18,7 +18,9 @@
 #include <climits>
 #include <cstdio>
 #include <algorithm>
+#include <fstream>
 #include <signal.h>
+#include <sstream>
 #include <string>
 
 #include <unistd.h>
@@ -1040,29 +1042,50 @@ std::string DeviceID() {
     return buf;
 }
 
-// First non-loopback IPv4 address in a private range (LAN direct connect),
-// mirroring the macOS shell so the phone can prefer a direct LAN connection.
+// Interface name that carries the default route, read from /proc/net/route
+// (the row whose Destination is 00000000). Used to prefer the real Wi-Fi /
+// Ethernet adapter over a VM host-only bridge (virbr*/docker*/veth*/…).
+std::string DefaultRouteInterface() {
+    std::ifstream f("/proc/net/route");
+    if (!f) return "";
+    std::string line;
+    std::getline(f, line);  // header row
+    while (std::getline(f, line)) {
+        std::istringstream ss(line);
+        std::string iface, dest, gw;
+        ss >> iface >> dest >> gw;
+        if (dest == "00000000") return iface;
+    }
+    return "";
+}
+
+// Best-effort LAN IPv4 for direct phone connect: the default-route interface
+// first, otherwise the first non-loopback, non-point-to-point private address.
 std::string LocalLANAddress() {
-    std::string result;
+    std::string primary = DefaultRouteInterface();
+    std::string fallback;
     ifaddrs* ifaddr = nullptr;
     if (getifaddrs(&ifaddr) != 0) return "";
     for (ifaddrs* cur = ifaddr; cur; cur = cur->ifa_next) {
         if (!cur->ifa_addr || cur->ifa_addr->sa_family != AF_INET) continue;
         unsigned flags = cur->ifa_flags;
         if ((flags & IFF_UP) == 0 || (flags & IFF_LOOPBACK) != 0) continue;
+        if ((flags & IFF_POINTOPOINT) != 0) continue;  // VPN/tunnel links
         char host[NI_MAXHOST] = {};
         if (getnameinfo(cur->ifa_addr, sizeof(sockaddr_in), host, sizeof(host),
                         nullptr, 0, NI_NUMERICHOST) != 0) {
             continue;
         }
         std::string s = host;
-        if (s.rfind("192.168.", 0) == 0) { freeifaddrs(ifaddr); return s; } // prefer 192.168.*
-        if (s.rfind("10.", 0) == 0 || s.rfind("172.", 0) == 0) {
-            if (result.empty()) result = s;
-        }
+        bool isPrivate = s.rfind("192.168.", 0) == 0 || s.rfind("10.", 0) == 0 ||
+                         s.rfind("172.", 0) == 0;
+        if (!isPrivate) continue;
+        std::string name = cur->ifa_name ? cur->ifa_name : "";
+        if (!primary.empty() && name == primary) { freeifaddrs(ifaddr); return s; }
+        if (fallback.empty()) fallback = s;
     }
     freeifaddrs(ifaddr);
-    return result;
+    return fallback;
 }
 
 // Stable pairing PIN: generated once, then kept in ~/.config/deepseek-harness/pin
@@ -1171,17 +1194,10 @@ std::string FindBridgeScript() {
 
 void MainWindow::OnMobileRemoteActivate(GtkWidget* /*item*/, gpointer userData) {
     auto* self = static_cast<MainWindow*>(userData);
+    // No confirmation dialog — toggling off disconnects immediately; the
+    // connection state is shown in the pairing dialog instead.
     if (self->bridgePid_ > 0) {
-        GtkWidget* dlg = gtk_message_dialog_new(
-            GTK_WINDOW(self->window_), GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
-            "%s", self->IsChinese() ? "已连接，是否断开？" : "Connected. Disconnect?");
-        gtk_dialog_add_buttons(GTK_DIALOG(dlg),
-                               self->IsChinese() ? "停止远程" : "Stop Remote", GTK_RESPONSE_ACCEPT,
-                               "OK", GTK_RESPONSE_CLOSE, nullptr);
-        if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
-            self->StopMobileBridge();
-        }
-        gtk_widget_destroy(dlg);
+        self->StopMobileBridge();
         return;
     }
 
@@ -1370,7 +1386,7 @@ void MainWindow::ShowPairingDialog(const std::string& pin, const std::string& de
         g_object_unref(loader);
     }
 
-    std::string codeText = (IsChinese() ? "设备码: " : "Device ID: ") + deviceId;
+    std::string codeText = (IsChinese() ? "设备 ID: " : "Device ID: ") + deviceId;
     GtkWidget* codeLabel = gtk_label_new(codeText.c_str());
     gtk_label_set_xalign(GTK_LABEL(codeLabel), 0.0);  // left-aligned
     gtk_label_set_selectable(GTK_LABEL(codeLabel), TRUE);
@@ -1378,7 +1394,7 @@ void MainWindow::ShowPairingDialog(const std::string& pin, const std::string& de
     gtk_box_pack_start(GTK_BOX(box), codeLabel, FALSE, FALSE, 0);
 
     std::string hint = IsChinese()
-        ? "在 Harness 远程 App 中扫描上方二维码；或手动输入设备码与 PIN。"
+        ? "在 Harness 远程 App 中扫描上方二维码；或手动输入设备 ID 与 PIN。"
         : "Scan the QR code in the Harness Remote app, or enter the device ID and PIN manually.";
     GtkWidget* hintLabel = gtk_label_new(hint.c_str());
     gtk_label_set_xalign(GTK_LABEL(hintLabel), 0.0);  // left-aligned

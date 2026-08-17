@@ -314,6 +314,20 @@ device→host 与 host→device）。
 `{type:"http-reply", id, status, headers, body(base64)}`；
 `sse-open`(body.raw=true) → `sse-frame {channel,data}` → `sse-close`。
 
+**大数据分片（`http-reply`）**：WebRTC DataChannel 单消息受协商的
+max-message-size 限制（werift 默认 64 KiB，libwebrtc 通常 ≤256 KiB），而
+dsh 插件 bundle 达 50–430 KB（base64 后 68–570 KB），单帧会触发
+werift `dc.send` 抛 `max-message-size exceeded`。因此当响应体超过
+16 KiB 时，bridge 把 `http-reply` 拆成头部 + 若干 `http-chunk`：
+
+- 头部：`{type:"http-reply", id, status, chunked:true, total, body:{headers}}`
+- 分片：`{type:"http-chunk", id, index, data}`（`data` 为 base64 片段，
+  按 `index` 升序拼接回完整 `body`；DataChannel 有序可靠，同 `id` 分片
+  顺序到达，不同 `id` 可交错）。
+- 手机侧按 `id` 缓冲 `http-chunk`，收齐 `total` 片后拼出完整
+  `{status, body:{headers, body}}` 再完成该请求。
+- 未分片的 `http-reply`（≤16 KiB）不带 `chunked`，行为与 §5 一致。
+
 ### 9.3 手机端升级/回退
 
 - 进入页面：先中继加载（秒开），后台 P2P connect（≤8s）→ 成功则

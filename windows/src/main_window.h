@@ -108,7 +108,7 @@ private:
     HANDLE bridgeThread_ = nullptr;
     bool bridgeRunning_ = false;
     std::wstring bridgeBuffer_; // bridge stdout line accumulation
-    std::wstring mobileRelayUrl_;
+    std::wstring mobileRelayUrl_ = L"https://relay.deepvisus.top";
     std::string deviceId_;
     std::string qrPNG_;
     bool registered_ = false;

@@ -1360,36 +1360,46 @@ std::string SaveBitmapPng(Gdiplus::Bitmap* bmp) {
     return out;
 }
 
-// First non-loopback IPv4 address in a private range (LAN direct connect),
-// mirroring the macOS shell so the phone can prefer a direct LAN connection.
-// Uses winsock getaddrinfo on the hostname (no iphlpapi dependency, which is
-// conditionally compiled in some SDK configurations).
+// Best-effort LAN IPv4 for direct phone connect: the default-route interface
+// first (so we prefer the real Wi-Fi/Ethernet adapter over a VMware/VirtualBox
+// host-only adapter whose address sorts first in the hostname's list),
+// otherwise the first private unicast address.
 std::string LocalLANAddress() {
-    char hostname[256] = {};
-    if (gethostname(hostname, sizeof(hostname)) != 0) return "";
-    addrinfo hints = {};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* res = nullptr;
-    if (getaddrinfo(hostname, nullptr, &hints, &res) != 0) return "";
-    std::string result;
-    for (addrinfo* p = res; p; p = p->ai_next) {
-        auto* sin = reinterpret_cast<sockaddr_in*>(p->ai_addr);
-        char ip[INET_ADDRSTRLEN] = {};
-        inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
-        std::string s = ip;
-        if (s.rfind("192.168.", 0) == 0) {  // prefer 192.168.*
-            freeaddrinfo(res);
-            return s;
-        }
-        if (result.empty() && (s.rfind("10.", 0) == 0 ||
-                               (s.rfind("172.", 0) == 0))) {
-            // Keep 10/8 and 172.16/12 as fallbacks (172.x check below).
-            result = s;
+    // Interface index of the default route (the adapter that reaches 8.8.8.8).
+    ULONG bestIfIndex = 0;
+    if (GetBestInterface(inet_addr("8.8.8.8"), &bestIfIndex) != NO_ERROR) {
+        bestIfIndex = 0;
+    }
+
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    ULONG bufLen = 0;
+    if (GetAdaptersAddresses(AF_INET, flags, nullptr, nullptr, &bufLen) != ERROR_BUFFER_OVERFLOW) {
+        return "";
+    }
+    std::vector<BYTE> buf(bufLen);
+    auto* adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
+    if (GetAdaptersAddresses(AF_INET, flags, nullptr, adapters, &bufLen) != NO_ERROR) {
+        return "";
+    }
+
+    std::string fallback;
+    for (auto* a = adapters; a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp) continue;
+        if (a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+        for (auto* ua = a->FirstUnicastAddress; ua; ua = ua->Next) {
+            if (ua->Address.lpSockaddr->sa_family != AF_INET) continue;
+            auto* sin = reinterpret_cast<sockaddr_in*>(ua->Address.lpSockaddr);
+            char ip[INET_ADDRSTRLEN] = {};
+            inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
+            std::string s = ip;
+            bool isPrivate = s.rfind("192.168.", 0) == 0 || s.rfind("10.", 0) == 0 ||
+                             s.rfind("172.", 0) == 0;
+            if (!isPrivate) continue;
+            if (bestIfIndex != 0 && a->IfIndex == bestIfIndex) return s;
+            if (fallback.empty()) fallback = s;
         }
     }
-    freeaddrinfo(res);
-    return result;
+    return fallback;
 }
 
 // Stable pairing PIN: generated once, then kept in the registry so reconnects
@@ -1609,12 +1619,10 @@ void MainWindow::OnSettings() {
 }
 
 void MainWindow::OnMobileRemote() {
+    // No confirmation popup — toggling off disconnects immediately; the
+    // connection state is shown in the pairing UI instead.
     if (bridgeRunning_) {
-        bool zh = IsChinese();
-        int r = MessageBoxW(hwnd_, zh ? L"已连接，是否断开？" : L"Connected. Disconnect?",
-                            zh ? L"远程连接" : L"Remote Connect",
-                            MB_YESNO | MB_ICONQUESTION);
-        if (r == IDYES) StopBridge();
+        StopBridge();
         return;
     }
 
@@ -1765,8 +1773,8 @@ INT_PTR CALLBACK MainWindow::PairingDialogProc(HWND hDlg, UINT msg, WPARAM wPara
         auto* ctx = reinterpret_cast<PairingCtx*>(lParam);
         SetWindowLongPtrW(hDlg, DWLP_USER, lParam);
         bool zh = MainWindow::Instance().IsChinese();
-        SetDlgItemTextW(hDlg, 104, ((zh ? L"设备码: " : L"Device ID: ") + ctx->deviceId).c_str());
-        SetDlgItemTextW(hDlg, 105, zh ? L"在 Harness 远程 App 中扫描上方二维码；或手动输入设备码与 PIN。"
+        SetDlgItemTextW(hDlg, 104, ((zh ? L"设备 ID: " : L"Device ID: ") + ctx->deviceId).c_str());
+        SetDlgItemTextW(hDlg, 105, zh ? L"在 Harness 远程 App 中扫描上方二维码；或手动输入设备 ID 与 PIN。"
                                       : L"Scan the QR code in the Harness Remote app, or enter the device ID and PIN manually.");
         if (!ctx->qrPNG.empty()) {
             HBITMAP hbmp = HBitmapFromPng(reinterpret_cast<const BYTE*>(ctx->qrPNG.data()),

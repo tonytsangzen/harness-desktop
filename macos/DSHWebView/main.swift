@@ -2,6 +2,7 @@ import AppKit
 import WebKit
 import CommonCrypto
 import IOKit
+import SystemConfiguration
 
 // MARK: - Configuration
 
@@ -71,17 +72,18 @@ struct MenuStrings {
     let mobileRemoteRelay: String
     let mobileRemoteCode: String
     let mobileRemoteHint: String
+    let mobileRemoteConnecting: String
     let mobileRemoteWaiting: String
     let mobileRemoteConnected: String
+    let mobileRemoteFailed: String
     let mobileRemoteNoApp: String
     let mobileRemoteGenerating: String
     let relayUnreachable: String
     let relayNotConfigured: String
     let settings: String
-    let relayAddress: String
+    let customRelay: String
     let relayHint: String
     let pairingPin: String
-    let pairingPinHint: String
 
     static let english = MenuStrings(
         checkForUpdates: "Check for Updates…",
@@ -112,19 +114,20 @@ struct MenuStrings {
         mobileRemoteActive: "Connected.",
         mobileRemoteStop: "Disconnect",
         mobileRemoteRelay: "Relay address",
-        mobileRemoteCode: "Pairing code",
+        mobileRemoteCode: "Device ID",
         mobileRemoteHint: "Scan the QR code in the Harness Remote app, or enter the pairing code and PIN manually.",
+        mobileRemoteConnecting: "Connecting to relay server…",
         mobileRemoteWaiting: "Waiting for the Remote app to connect…",
         mobileRemoteConnected: "Remote app connected.",
+        mobileRemoteFailed: "Remote Connect failed to start.",
         mobileRemoteNoApp: "No app connected yet.",
         mobileRemoteGenerating: "Generating QR code…",
         relayUnreachable: "Relay server unreachable. Check the relay address in Settings… and try again.",
         relayNotConfigured: "Relay address not configured. Set it in Settings… first, then use Remote Connect.",
         settings: "Settings…",
-        relayAddress: "Relay address (URL or IP:port)",
+        customRelay: "Custom relay server address",
         relayHint: "The remote app connects to this machine through this cloud relay. Used by Remote Connect.",
-        pairingPin: "Pairing PIN (6 digits)",
-        pairingPinHint: "Fixed pairing PIN shown in Remote Connect. Generated on first launch; change it here anytime."
+        pairingPin: "Pairing PIN",
     )
 
     static let chinese = MenuStrings(
@@ -156,19 +159,20 @@ struct MenuStrings {
         mobileRemoteActive: "已连接。",
         mobileRemoteStop: "断开",
         mobileRemoteRelay: "中继地址",
-        mobileRemoteCode: "配对码",
-        mobileRemoteHint: "在 Harness 远程 App 中扫描下方二维码；或手动输入配对码与 PIN。",
+        mobileRemoteCode: "设备 ID",
+        mobileRemoteHint: "在 Harness 远程 App 中扫描下方二维码；或手动输入设备 ID 与 PIN。",
+        mobileRemoteConnecting: "正在连接中继服务器…",
         mobileRemoteWaiting: "等待远程 App 连接…",
         mobileRemoteConnected: "远程 App 已连接。",
+        mobileRemoteFailed: "远程连接启动失败。",
         mobileRemoteNoApp: "尚未有 App 连接。",
         mobileRemoteGenerating: "正在生成二维码…",
         relayUnreachable: "中继服务器不可用。请检查「设置…」中的中继地址后重试。",
         relayNotConfigured: "尚未配置中继地址。请先在「设置…」中填写中继地址，再使用远程连接。",
         settings: "设置…",
-        relayAddress: "中继地址（URL 或 IP:端口）",
+        customRelay: "自定义中继服务器地址",
         relayHint: "远程 App 通过该云端中继连接本机。保存后「远程连接」使用此地址。",
-        pairingPin: "配对 PIN（6 位数字）",
-        pairingPinHint: "「远程连接」中显示的固定配对 PIN。首次启动随机生成，可随时在此修改。"
+        pairingPin: "配对 PIN",
     )
 
     static func forLanguage(_ language: AppLanguage) -> MenuStrings {
@@ -759,33 +763,56 @@ func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?) -
     return qr
 }
 
-/// First non-loopback IPv4 address in a private range (LAN direct connect).
+/// The interface name that carries the default route (e.g. "en0"), read from
+/// SystemConfiguration. Used to prefer the real Wi-Fi/Ethernet adapter over a
+/// VM host-only / bridge address (bridge102, vmenet*, utun*, …) that the phone
+/// cannot reach.
+private func primaryInterfaceName() -> String? {
+    guard let store = SCDynamicStoreCreate(nil, "DSHWebView" as CFString, nil, nil),
+          let global = SCDynamicStoreCopyValue(store, "State:/Network/Global/IPv4" as CFString) as? [String: Any],
+          let name = global["PrimaryInterface"] as? String else {
+        return nil
+    }
+    return name
+}
+
+/// Best-effort LAN IPv4 for direct phone connect: the default-route interface
+/// first, otherwise the first non-loopback, non-point-to-point private address
+/// (192.168.* preferred).
 func LocalLANAddress() -> String? {
-    var address: String?
+    let primary = primaryInterfaceName()
+    var fallback: String?
     var ifaddr: UnsafeMutablePointer<ifaddrs>?
     guard getifaddrs(&ifaddr) == 0 else { return nil }
     defer { freeifaddrs(ifaddr) }
     var cursor = ifaddr
     while let ptr = cursor {
         let interface = ptr.pointee
-        if interface.ifa_addr != nil && interface.ifa_addr.pointee.sa_family == UInt8(AF_INET) {
+        if let name = interface.ifa_name,
+           interface.ifa_addr != nil && interface.ifa_addr.pointee.sa_family == UInt8(AF_INET) {
             let flags = Int32(interface.ifa_flags)
-            let upAndNotLoopback = (flags & IFF_UP) != 0 && (flags & IFF_LOOPBACK) == 0
-            if upAndNotLoopback {
+            let usable = (flags & IFF_UP) != 0 && (flags & IFF_LOOPBACK) == 0 && (flags & IFF_POINTOPOINT) == 0
+            if usable {
                 var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                 let saLen = socklen_t(interface.ifa_addr.pointee.sa_len)
                 if getnameinfo(interface.ifa_addr, saLen, &host, socklen_t(host.count),
                                nil, 0, NI_NUMERICHOST) == 0 {
                     let ip = String(cString: host)
-                    // Prefer the common private ranges; 192.168.* first.
-                    if ip.hasPrefix("192.168.") { address = ip; break }
-                    if ip.hasPrefix("10.") || ip.hasPrefix("172.") { address = ip }
+                    let isPrivate = ip.hasPrefix("192.168.") || ip.hasPrefix("10.") || ip.hasPrefix("172.")
+                    if isPrivate {
+                        if let p = primary, String(cString: name) == p { return ip }
+                        if fallback == nil {
+                            fallback = ip
+                        } else if ip.hasPrefix("192.168.") && !fallback!.hasPrefix("192.168.") {
+                            fallback = ip
+                        }
+                    }
                 }
             }
         }
         cursor = ptr.pointee.ifa_next
     }
-    return address
+    return fallback
 }
 
 /// Renders a QR code as PNG data using CoreImage (CIQRCodeGenerator).
@@ -1266,7 +1293,7 @@ final class DSHUpdateManager {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler, NSWindowDelegate, NSTextFieldDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private let settings: Settings
@@ -1289,6 +1316,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var mobileRemote: MobileRemoteManager?
     private var relayPanel: NSPanel?
     private var relayField: NSTextField?
+    private var relayHintRef: NSTextField?
+    private var customRelaySwitchRef: NSSwitch?
     private var relayPinField: NSTextField?
     private var remoteSwitchRef: NSSwitch?
     private var remoteInfoView: NSStackView?
@@ -1873,96 +1902,116 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         panel.isReleasedWhenClosed = false
         panel.center()
 
-        // Field label.
-        let fieldLabel = NSTextField(labelWithString: s.relayAddress)
-        fieldLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        // Custom relay switch row — off uses the default relay server
+        // (relay.deepvisus.top); on reveals the address field below.
+        let customRelayLabel = NSTextField(labelWithString: s.customRelay)
+        customRelayLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        let customRelaySwitch = NSSwitch()
+        customRelaySwitch.target = self
+        customRelaySwitch.action = #selector(customRelayToggled(_:))
+        let customOn = UserDefaults.standard.bool(forKey: "mobileRelayCustom")
+        customRelaySwitch.state = customOn ? .on : .off
+        let customRelaySpacer = NSView()
+        customRelaySpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let customRelayRow = NSStackView(views: [customRelayLabel, customRelaySpacer, customRelaySwitch])
+        customRelayRow.orientation = .horizontal
+        customRelayRow.spacing = 10
 
-        // Address input.
-        let field = NSTextField(string: UserDefaults.standard.string(forKey: "mobileRelayURL") ?? "https://")
-        field.placeholderString = "relay.example.com:8443"
-        field.font = NSFont.systemFont(ofSize: 13)
+        // Address input — only shown while the custom switch is on.
+        let field = NSTextField(string: UserDefaults.standard.string(forKey: "mobileRelayURL") ?? "https://relay.deepvisus.top")
+        field.placeholderString = "relay.deepvisus.top"
+        field.font = NSFont.systemFont(ofSize: 14)
         field.focusRingType = .default
+        field.delegate = self
+        field.isHidden = !customOn
 
         // Hint (wrapping, dimmer).
         let hint = NSTextField(wrappingLabelWithString: s.relayHint)
-        hint.font = NSFont.systemFont(ofSize: 11)
+        hint.font = NSFont.systemFont(ofSize: 12)
         hint.textColor = .secondaryLabelColor
         hint.preferredMaxLayoutWidth = 388
+        hint.isHidden = !customOn
 
-        // Pairing PIN — stable, editable.
+        // Pairing PIN row — label left, field right (form-row style).
         let pinLabel = NSTextField(labelWithString: s.pairingPin)
-        pinLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        pinLabel.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         let pinField = NSTextField(string: StablePairingPin())
-        pinField.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        pinField.font = NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular)
         pinField.focusRingType = .default
-
-        // PIN hint (dimmer).
-        let pinHint = NSTextField(wrappingLabelWithString: s.pairingPinHint)
-        pinHint.font = NSFont.systemFont(ofSize: 11)
-        pinHint.textColor = .secondaryLabelColor
-        pinHint.preferredMaxLayoutWidth = 388
+        pinField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let pinRow = NSStackView(views: [pinLabel, pinField])
+        pinRow.orientation = .horizontal
+        pinRow.spacing = 10
 
         // Separator before the Remote Connect section.
         let divider = NSBox()
         divider.boxType = .separator
 
-        // Remote Connect toggle row.
+        // Remote Connect toggle row — label left, switch right.
         let remoteTitle = NSTextField(labelWithString: s.mobileRemote)
-        remoteTitle.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        remoteTitle.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         let remoteSwitch = NSSwitch()
         remoteSwitch.target = self
         remoteSwitch.action = #selector(remoteToggleChanged(_:))
         // Restore the persisted toggle state (the bridge may not be running
         // yet right after launch even though the toggle is on).
         remoteSwitch.state = UserDefaults.standard.bool(forKey: "mobileRemoteEnabled") ? .on : .off
-        let remoteRow = NSStackView(views: [remoteTitle, remoteSwitch])
+        let remoteSpacer = NSView()
+        remoteSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let remoteRow = NSStackView(views: [remoteTitle, remoteSpacer, remoteSwitch])
         remoteRow.orientation = .horizontal
-        remoteRow.spacing = 8
+        remoteRow.spacing = 10
 
         // Connection info area (QR + code + status) — hidden until on.
         let qrView = NSImageView()
         qrView.imageScaling = .scaleProportionallyUpOrDown
         let infoCode = NSTextField(labelWithString: "")
-        infoCode.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        infoCode.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
         infoCode.alignment = .left
         infoCode.isSelectable = true
         let infoRelay = NSTextField(labelWithString: "")
-        infoRelay.font = NSFont.systemFont(ofSize: 11)
+        infoRelay.font = NSFont.systemFont(ofSize: 12)
         infoRelay.textColor = .secondaryLabelColor
         infoRelay.alignment = .left
         let infoStatus = NSTextField(labelWithString: s.mobileRemoteWaiting)
-        infoStatus.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        infoStatus.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
         infoStatus.alignment = .left
         infoStatus.lineBreakMode = .byTruncatingTail
         let infoView = NSStackView(views: [qrView, infoCode, infoRelay, infoStatus])
         infoView.orientation = .vertical
         infoView.alignment = .width
-        infoView.spacing = 8
+        infoView.spacing = 10
         infoView.isHidden = !(mobileRemote?.isRunning ?? false)
 
-        // Buttons: Cancel | OK (trailing).
+        // Buttons: Cancel | OK on a single horizontal row (one-row grid,
+        // immune to the nested-stack stacking bug), pushed to the trailing
+        // edge by an elastic spacer.
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelRelaySettings(_:)))
         let save = NSButton(title: "OK", target: self, action: #selector(saveRelaySettings(_:)))
         save.keyEquivalent = "\r"
-        let buttons = NSStackView(views: [cancel, save])
+        let buttonsGrid = NSGridView(views: [[cancel, save]])
+        buttonsGrid.columnSpacing = 8
+        let buttonSpacer = NSView()
+        buttonSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let buttons = NSStackView(views: [buttonSpacer, buttonsGrid])
         buttons.orientation = .horizontal
         buttons.spacing = 8
-        buttons.alignment = .trailing
 
-        let stack = NSStackView(views: [fieldLabel, field, hint, pinLabel, pinField, pinHint,
+        let stack = NSStackView(views: [customRelayRow, field, hint,
+                                        pinRow,
                                         divider, remoteRow, infoView, buttons])
         stack.orientation = .vertical
         stack.alignment = .width   // children fill the panel width
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         NSLayoutConstraint.activate([
             stack.widthAnchor.constraint(equalToConstant: 420),
             field.heightAnchor.constraint(equalToConstant: 24),
             hint.widthAnchor.constraint(equalToConstant: 388),
-            qrView.widthAnchor.constraint(equalToConstant: 240),
-            qrView.heightAnchor.constraint(equalToConstant: 240),
+            qrView.widthAnchor.constraint(equalToConstant: 250),
+            qrView.heightAnchor.constraint(equalToConstant: 250),
             qrView.centerXAnchor.constraint(equalTo: stack.centerXAnchor),
         ])
 
@@ -1971,6 +2020,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         panel.makeKeyAndOrderFront(nil)
         relayPanel = panel
         relayField = field
+        relayHintRef = hint
+        customRelaySwitchRef = customRelaySwitch
         relayPinField = pinField
         remoteSwitchRef = remoteSwitch
         remoteInfoView = infoView
@@ -2001,23 +2052,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return true
     }
 
+    /// Settings panel: reveal/hide the custom relay address field, and persist
+    /// the switch state immediately so Remote Connect never uses stale settings.
+    @objc private func customRelayToggled(_ sender: Any?) {
+        let on = (customRelaySwitchRef?.state ?? .off) == .on
+        UserDefaults.standard.set(on, forKey: "mobileRelayCustom")
+        relayField?.isHidden = !on
+        relayHintRef?.isHidden = !on
+    }
+
+    /// Persist the relay address as the user types (before OK is pressed), so
+    /// toggling Remote Connect on right after an edit uses the new value.
+    func controlTextDidChange(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField, field === relayField else { return }
+        UserDefaults.standard.set(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+                                  forKey: "mobileRelayURL")
+    }
+
     @objc private func saveRelaySettings(_ sender: Any?) {
         guard let panel = relayPanel else { return }
+        let defaultRelay = "https://relay.deepvisus.top"
+        let oldCustom = UserDefaults.standard.bool(forKey: "mobileRelayCustom")
         let oldRelay = UserDefaults.standard.string(forKey: "mobileRelayURL")
         let oldPin = UserDefaults.standard.string(forKey: "mobilePairingPin")
+        let oldEffective = oldCustom ? (oldRelay ?? defaultRelay) : defaultRelay
         var relayChanged = false
         var pinChanged = false
-        let raw = (relayField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if !raw.isEmpty {
-            var relay = raw
-            if !relay.lowercased().hasPrefix("http://"), !relay.lowercased().hasPrefix("https://") {
-                // Loopback addresses usually run a plain-HTTP test relay;
-                // anything else defaults to HTTPS.
-                relay = (isLoopbackHost(relay) ? "http://" : "https://") + relay
+        // Custom switch: off → always use the default relay server; the
+        // previously entered custom address is kept for the next time the
+        // switch is turned on.
+        let newCustom = (customRelaySwitchRef?.state ?? .off) == .on
+        UserDefaults.standard.set(newCustom, forKey: "mobileRelayCustom")
+        var relay = defaultRelay
+        if newCustom {
+            let raw = (relayField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !raw.isEmpty {
+                relay = normalizeRelay(raw)
+                UserDefaults.standard.set(relay, forKey: "mobileRelayURL")
+            } else {
+                relay = "" // custom on but empty → treated as unconfigured
             }
-            UserDefaults.standard.set(relay, forKey: "mobileRelayURL")
-            relayChanged = relay != oldRelay
         }
+        relayChanged = relay != oldEffective
         // Save the pairing PIN when it is a valid 6-digit number.
         if let pinText = relayPinField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
            pinText.count == 6, pinText.allSatisfy({ $0.isNumber }) {
@@ -2047,6 +2123,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         return h == "localhost" || h == "::1" || h.hasPrefix("127.")
     }
 
+    /// Normalize a relay address: strip whitespace and default the scheme —
+    /// http:// for loopback hosts, https:// otherwise.
+    private func normalizeRelay(_ raw: String) -> String {
+        let r = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !r.isEmpty else { return r }
+        if r.lowercased().hasPrefix("http://") || r.lowercased().hasPrefix("https://") { return r }
+        return (isLoopbackHost(r) ? "http://" : "https://") + r
+    }
+
     @objc private func cancelRelaySettings(_ sender: Any?) {
         NSApp.stopModal()
         relayPanel?.orderOut(nil)
@@ -2074,8 +2159,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         if let m = mobileRemote, m.isRunning { return }
         let s = uiStrings
 
-        // Relay address comes from Settings… (mobileRelayURL).
-        let relay = UserDefaults.standard.string(forKey: "mobileRelayURL") ?? ""
+        // Relay: default server unless the custom address switch is on.
+        let defaultRelay = "https://relay.deepvisus.top"
+        let relay: String
+        if UserDefaults.standard.bool(forKey: "mobileRelayCustom") {
+            relay = normalizeRelay(UserDefaults.standard.string(forKey: "mobileRelayURL") ?? "")
+        } else {
+            relay = defaultRelay
+        }
         guard !relay.isEmpty else {
             if !silent {
                 let alert = NSAlert()
@@ -2087,16 +2178,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             return
         }
         guard let node = NodeRuntimeManager.nodePath() else {
-            if !silent {
-                let err = NSAlert()
-                err.messageText = s.mobileRemote
-                err.informativeText = "Node.js is required to run the mobile bridge."
-                err.runModal()
-            }
+            // No popup — surface the failure inline in the settings panel.
+            setRemoteStatus(s.mobileRemoteFailed, color: .systemRed)
             remoteSwitchRef?.state = .off
             return
         }
         guard let bridge = Bundle.main.resourceURL?.appendingPathComponent("bridge/bridge.mjs") else {
+            setRemoteStatus(s.mobileRemoteFailed, color: .systemRed)
             remoteSwitchRef?.state = .off
             return
         }
@@ -2108,14 +2196,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let lan = LocalLANAddress().map { "\($0):13080" }
         let qrContent = PairingQRContent(relayURL: relay, deviceID: deviceID, lanAddress: lan)
         guard let qrPNG = GenerateQRPNG(content: qrContent) else {
-            if !silent {
-                let err = NSAlert()
-                err.messageText = s.mobileRemote
-                err.informativeText = "Failed to generate the pairing QR code."
-                err.runModal()
-            }
+            setRemoteStatus(s.mobileRemoteFailed, color: .systemRed)
             remoteSwitchRef?.state = .off
             return
+        }
+
+        // Show the status area right away (QR + device ID + relay + a
+        // "connecting" state) while the bridge registers with the relay —
+        // no popup, everything lives in the settings panel.
+        if relayPanel != nil {
+            remoteInfoView?.isHidden = false
+            remoteQrView?.image = NSImage(data: qrPNG)
+            remoteCodeLabel?.stringValue = "\(s.mobileRemoteCode): \(deviceID)"
+            remoteRelayLabel?.stringValue = "\(s.mobileRemoteRelay): \(relay)"
+            setRemoteStatus(s.mobileRemoteConnecting, color: .systemOrange)
         }
 
         let m = MobileRemoteManager(nodePath: node, bridgePath: bridge,
@@ -2127,6 +2221,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         mobileRemote = m
 
         // Registration must succeed within 12s or the relay is unreachable.
+        // On failure: no popup — show the status inline and flip the toggle.
         var registered = false
         let timeout = DispatchWorkItem { [weak self] in
             guard let self = self, !registered else { return }
@@ -2134,14 +2229,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             self.mobileRemote = nil
             self.lastPairing = nil
             self.lastQrPNG = nil
-            if !silent {
-                self.remoteSwitchRef?.state = .off
-                self.remoteInfoView?.isHidden = true
-                let err = NSAlert()
-                err.messageText = self.uiStrings.mobileRemote
-                err.informativeText = self.uiStrings.relayUnreachable
-                err.runModal()
-            }
+            self.remoteSwitchRef?.state = .off
+            self.setRemoteStatus(self.uiStrings.relayUnreachable, color: .systemRed)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: timeout)
         m.onRegistered = { [weak self] pairing in
@@ -2167,6 +2256,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         lastQrPNG = nil
     }
 
+    /// Update the inline status line in the settings panel (no popups).
+    private func setRemoteStatus(_ text: String, color: NSColor?) {
+        remoteStatusLabel?.stringValue = text
+        if let color { remoteStatusLabel?.textColor = color }
+    }
+
     /// Fill the settings-panel connection info area (QR + PIN + code + status).
     private func fillRemoteInfo(_ pairing: MobileRemoteManager.Pairing, qrPNG: Data, deviceID: String) {
         let s = uiStrings
@@ -2174,8 +2269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         remoteQrView?.image = NSImage(data: qrPNG)
         remoteCodeLabel?.stringValue = "\(s.mobileRemoteCode): \(deviceID)"
         remoteRelayLabel?.stringValue = "\(s.mobileRemoteRelay): \(mobileRemote?.relayURL ?? "")"
-        remoteStatusLabel?.stringValue = s.mobileRemoteWaiting
-        remoteStatusLabel?.textColor = .systemOrange
+        setRemoteStatus(s.mobileRemoteWaiting, color: .systemOrange)
     }
 
     /// Poll the relay for connected devices every 2s while the settings panel
@@ -2204,11 +2298,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             DispatchQueue.main.async {
                 let s = self.uiStrings
                 if online {
-                    self.remoteStatusLabel?.stringValue = s.mobileRemoteConnected
-                    self.remoteStatusLabel?.textColor = .systemGreen
+                    self.setRemoteStatus(s.mobileRemoteConnected, color: .systemGreen)
                 } else {
-                    self.remoteStatusLabel?.stringValue = count == 0 ? s.mobileRemoteWaiting : s.mobileRemoteNoApp
-                    self.remoteStatusLabel?.textColor = .systemOrange
+                    self.setRemoteStatus(count == 0 ? s.mobileRemoteWaiting : s.mobileRemoteNoApp,
+                                         color: .systemOrange)
                 }
             }
         }.resume()

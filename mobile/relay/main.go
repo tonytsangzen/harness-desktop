@@ -7,9 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -192,7 +194,12 @@ func main() {
 	srv := &server{store: st, hub: h}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	// Health checks: keep the bare /healthz for container/loopback probes,
+	// and expose /relay/healthz so reverse proxies that only forward /relay/
+	// (see deploy/nginx.conf, deploy/nginx-http.conf) can reach it too.
+	healthz := func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) }
+	mux.HandleFunc("/healthz", healthz)
+	mux.HandleFunc("/relay/healthz", healthz)
 	mux.HandleFunc("/relay/v1/pair", srv.handlePair)
 	mux.HandleFunc("/relay/v1/pair/refresh", srv.handleRefresh)
 	mux.HandleFunc("/relay/v1/revoke", srv.handleRevoke)
@@ -200,7 +207,15 @@ func main() {
 	mux.HandleFunc("/relay/v1/host", srv.handleHost)
 	mux.HandleFunc("/relay/v1/device", srv.handleDevice)
 
-	addr := ":5678"
+	// Listen address: default ":8443" (HTTP; TLS/WSS is terminated by nginx
+	// in front, see deploy/nginx.conf). Configurable via the RELAY_ADDR
+	// environment variable or the -addr flag (flag overrides env).
+	addr := ":8443"
+	if env := os.Getenv("RELAY_ADDR"); env != "" {
+		addr = env
+	}
+	flag.StringVar(&addr, "addr", addr, "listen address, e.g. \":8443\"")
+	flag.Parse()
 	log.Printf("relay listening on %s (WSS only behind TLS reverse proxy)", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
