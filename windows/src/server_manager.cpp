@@ -10,6 +10,9 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <string>
 #include <system_error>
 #include <thread>
 
@@ -24,6 +27,54 @@ Settings g_settings;
 HANDLE g_job = nullptr;
 HANDLE g_process = nullptr;
 bool g_reusing = false;
+
+// Called with each complete log line the child writes (see SetLogHandler).
+std::function<void(const std::wstring&)> g_onLog;
+
+// UTF-8 (Node console output) → UTF-16 for the UI.
+std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+    if (len <= 0) return L"";
+    std::wstring out(len, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), out.data(), len);
+    return out;
+}
+
+// Reads bytes newly appended to the log file (the child appends stdout and
+// stderr here). Returns complete lines; an unterminated tail stays in
+// `pending` until a newline (or a final flush) arrives.
+std::vector<std::wstring> DrainLogFile(const std::wstring& path, std::streamoff& lastSize,
+                                       std::string& pending) {
+    std::vector<std::wstring> lines;
+    std::error_code ec;
+    auto size = std::filesystem::file_size(path, ec);
+    if (ec || size <= lastSize) {
+        // Truncated/rotated (each Start() recreates the file): restart.
+        if (!ec && size < lastSize) {
+            lastSize = 0;
+            pending.clear();
+        }
+        return lines;
+    }
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return lines;
+    f.seekg(lastSize);
+    std::string chunk((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    lastSize = size;
+    if (pending.size() + chunk.size() > 8192) {
+        pending = pending.substr(pending.size() > 4096 ? pending.size() - 4096 : 0);
+    }
+    pending += chunk;
+    size_t nl;
+    while ((nl = pending.find('\n')) != std::string::npos) {
+        std::string line = pending.substr(0, nl);
+        pending.erase(0, nl + 1);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (!line.empty()) lines.push_back(Utf8ToWide(line));
+    }
+    return lines;
+}
 
 std::wstring LogFilePath() {
     return JoinPath(GetTempDir(), L"DSHWebView-dsh.log");
@@ -89,23 +140,25 @@ std::wstring PrepareCommandLine() {
 
     std::vector<std::wstring> argv = g_settings.command;
 
-    // When the command is the standard `npx --yes @deepseek-ai/dsh web ...`
-    // form and a cached copy of @deepseek-ai/dsh exists, run it directly with
-    // node. This skips npx's online registry revalidation, so startup never
-    // waits on the network. A newer release is surfaced later by the
-    // background update check (DshUpdateManager) running on its own thread.
+    // When the command is the standard `npx --yes [--verbose] @deepseek-ai/dsh
+    // web ...` form and a cached copy of @deepseek-ai/dsh exists, run it
+    // directly with node. This skips npx's online registry revalidation, so
+    // startup never waits on the network. A newer release is surfaced later by
+    // the background update check (DshUpdateManager) on its own thread.
     bool hasYes = argv.size() >= 3 && argv[1] == L"--yes";
+    bool hasVerbose = argv.size() >= 4 && argv[2] == L"--verbose";
     bool defaultNpxForm = argv.size() >= 2 &&
                           (argv[0] == L"npx" || argv[0] == L"npx.cmd") &&
                           (argv[1] == L"@deepseek-ai/dsh" ||
-                           (hasYes && argv[2] == L"@deepseek-ai/dsh"));
+                           (hasYes && (argv[2] == L"@deepseek-ai/dsh" ||
+                                       (hasVerbose && argv[3] == L"@deepseek-ai/dsh"))));
     if (defaultNpxForm) {
         auto dshDir = FindCachedDshDir();
         auto node = NodeRuntimeManager::NodePath();
         auto bin = JoinPath(dshDir, L"lib\\bin.js");
         if (!dshDir.empty() && !node.empty() && FileExists(bin)) {
             std::wstring direct = QuoteArg(node) + L" " + QuoteArg(bin);
-            size_t start = hasYes ? 3 : 2;  // skip npx [--yes] @deepseek-ai/dsh
+            size_t start = hasVerbose ? 4 : (hasYes ? 3 : 2); // skip npx [--yes [--verbose]] @deepseek-ai/dsh
             for (size_t i = start; i < argv.size(); i++) {
                 direct += L" " + QuoteArg(argv[i]);
             }
@@ -277,14 +330,36 @@ unsigned short Port() { return g_settings.port; }
 std::wstring Host() { return g_settings.host; }
 std::wstring Url() { return g_settings.Url(); }
 
+void SetLogHandler(const std::function<void(const std::wstring&)>& handler) {
+    g_onLog = handler;
+}
+
 bool WaitUntilReady(int timeoutMs, const std::function<void()>& onWaiting) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+
+    // Incremental log-file reader: new output resets the countdown below and
+    // each complete line is forwarded to the UI handler.
+    std::streamoff logPos = 0;
+    std::string logPending;
 
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return false;
 
     bool ready = false;
     while (std::chrono::steady_clock::now() < deadline) {
+        // Drain new log output first: while the child is alive and producing
+        // output (e.g. npx installing the dsh package), keep waiting. Skipped
+        // when reusing an existing instance — its log file is stale.
+        if (!g_reusing) {
+            auto lines = DrainLogFile(LogFilePath(), logPos, logPending);
+            if (!lines.empty()) {
+                deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+                for (auto& line : lines) {
+                    if (g_onLog) g_onLog(line);
+                }
+            }
+        }
+
         if (!IsRunning() && !g_reusing) break;
 
         SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -303,6 +378,13 @@ bool WaitUntilReady(int timeoutMs, const std::function<void()>& onWaiting) {
 
         if (onWaiting) onWaiting();
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    }
+
+    // Flush a final unterminated line (e.g. "listening on port 3080" without
+    // a trailing newline) so the last line is always shown.
+    if (g_onLog && !logPending.empty()) {
+        if (!logPending.empty() && logPending.back() == '\r') logPending.pop_back();
+        if (!logPending.empty()) g_onLog(Utf8ToWide(logPending));
     }
 
     WSACleanup();

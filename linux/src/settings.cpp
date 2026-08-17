@@ -8,7 +8,7 @@ namespace dsh {
 const char* kUsageText =
     "Usage: dshwebview [--host <host>] [--port <port>] [--command \"<cmd>\"] [--help]\n"
     "\n"
-    "Wraps the DeepSeek Harness web UI (`npx @deepseek-ai/dsh web`) in a native\n"
+    "Wraps the DeepSeek Harness web UI (`npx --yes --verbose @deepseek-ai/dsh web`) in a native\n"
     "WebKitGTK window.\n"
     "\n"
     "  --host <host>      Host for the dsh web server (default: 127.0.0.1)\n"

@@ -1,6 +1,6 @@
 # DeepSeek Harness Desktop
 
-Native desktop shells for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) browser UI. Each shell launches `npx @deepseek-ai/dsh web` as a child process and displays the served page in the operating system's built-in webview — **no Electron, no bundled Chromium/Node**, and no compilation of the harness project itself.
+Native desktop shells for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) browser UI. Each shell launches `npx --yes --verbose @deepseek-ai/dsh web` as a child process and displays the served page in the operating system's built-in webview — **no Electron, no bundled Chromium/Node**, and no compilation of the harness project itself.
 
 Currently supported platforms:
 
@@ -64,7 +64,7 @@ You can also just download the `.dmg` from the release and drag the app into
 
 ### Runtime provisioning
 
-The app spawns `npx @deepseek-ai/dsh web` at runtime, so it needs Node.js. It
+The app spawns `npx --yes --verbose @deepseek-ai/dsh web` at runtime, so it needs Node.js. It
 **installs it automatically** on first launch when missing:
 
 1. Detects whether `node` and `npx` are on `PATH`. If so, it starts immediately.
@@ -111,7 +111,7 @@ CPU architecture (`x86_64` for Intel/AMD 64-bit, `aarch64` for ARM64):
 
 Runtime dependencies (installed on virtually every desktop distro): GTK 3,
 WebKitGTK 4.1, libsoup 3. **Node.js is required** at runtime — the app spawns
-`npx @deepseek-ai/dsh web` — but if it is missing the shell downloads and
+`npx --yes --verbose @deepseek-ai/dsh web` — but if it is missing the shell downloads and
 installs the latest LTS automatically (user-level, no root), like the
 macOS/Windows shells.
 
@@ -135,7 +135,7 @@ This installs (and is safe to re-run; each step skips when already satisfied):
 | --- | --- |
 | Xcode Command Line Tools | `swift`, `swift build`, `codesign`, `sips` (build-time) |
 | Homebrew | Package manager used to install Node.js |
-| Node.js 22 + npm/npx | Runtime — the app spawns `npx @deepseek-ai/dsh web` |
+| Node.js 22 + npm/npx | Runtime — the app spawns `npx --yes --verbose @deepseek-ai/dsh web` |
 
 Note: the `xcode-select --install` step pops a GUI dialog; click **Install**, accept the license, wait for the download to finish, then re-run the script.
 
@@ -167,7 +167,7 @@ swift run DSHWebView
 On launch the app:
 
 1. Checks for Node.js and installs it if missing (see [Runtime provisioning](#runtime-provisioning)).
-2. Spawns `npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080` (or an automatically chosen free port — see below).
+2. Spawns `npx --yes --verbose @deepseek-ai/dsh web --host 127.0.0.1 --port 3080` (or an automatically chosen free port — see below).
 3. Polls the server until it accepts connections (up to 180 s).
 4. Loads the served page in the `WKWebView` and shows the window.
 5. Terminates the child process when the last window closes.
@@ -176,7 +176,7 @@ On launch the app:
 8. Offers theme and language settings under the **View** menu: theme follows the system by default with **Light**/**Dark** overrides (affects the native chrome and the web content's `prefers-color-scheme`), and the menu language follows the system locale by default with **简体中文**/**English** overrides. Both persist across launches.
 9. Provides an **Enter/Exit Full Screen** item (⌃⌘F) under the **View** menu.
 
-The first launch downloads `@deepseek-ai/dsh` via npx, so startup can take a while.
+The first launch downloads `@deepseek-ai/dsh` via npx, so startup can take a while. While the server is starting, the loading screen shows the **last line** of the server's log output at the bottom, and the 180 s startup timeout **resets on every new log line** — a slow-but-progressing first install (npx downloading the package) is never killed by the timeout.
 
 ### Port selection
 
@@ -188,7 +188,7 @@ If the configured port (default `3080`) is already in use by another process, th
 | --- | --- | --- |
 | `--host <host>` | `127.0.0.1` | Host for the dsh web server |
 | `--port <port>` | `3080` | Preferred port for the dsh web server (falls back to a free port if taken) |
-| `--command "<cmd>"` | `npx @deepseek-ai/dsh web` | Full launch command (space-separated) |
+| `--command "<cmd>"` | `npx --yes --verbose @deepseek-ai/dsh web` | Full launch command (space-separated) |
 | `--help`, `-h` | — | Print usage to stderr and exit |
 
 When the default command is used, the resolved host and port are appended automatically so the webview and the server stay in agreement. A custom `--command` is launched verbatim.
@@ -220,7 +220,7 @@ shell's behavior:
 1. Detects and provisions Node.js (downloads the official Windows `.zip`,
    extracts to `%LOCALAPPDATA%\Programs\nodejs`, and appends it to the user PATH —
    no administrator rights needed).
-2. Spawns `npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080` without a
+2. Spawns `npx --yes --verbose @deepseek-ai/dsh web --host 127.0.0.1 --port 3080` without a
    console window; stdout/stderr are captured to `%TEMP%\DSHWebView-dsh.log`.
 3. Polls the server until it accepts connections, then loads the served page in
    the WebView2 window. A loading overlay reports runtime provisioning progress.
@@ -295,7 +295,7 @@ behavior:
    `~/.local/share/deepseek-harness/nodejs` (no root needed; mirrors
    macOS/Windows) with a progress dialog, then continues — a manual install
    dialog is only shown if the automatic install fails.
-2. Spawns `npx @deepseek-ai/dsh web --host 127.0.0.1 --port 3080` as a child in
+2. Spawns `npx --yes --verbose @deepseek-ai/dsh web --host 127.0.0.1 --port 3080` as a child in
    its own process group; stdout/stderr are captured to
    `~/.cache/deepseek-harness/dsh-server.log(.err)`.
 3. Polls the server until it accepts connections (up to 180 s), then loads the

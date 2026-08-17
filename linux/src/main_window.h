@@ -3,6 +3,7 @@
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
 
+#include <fstream>
 #include <string>
 
 namespace dsh {
@@ -36,6 +37,8 @@ private:
     WebKitSettings* webSettings_ = nullptr;
     GtkWidget* loadingOverlay_ = nullptr;
     GtkWidget* loadingHint_ = nullptr;
+    // Last server log line, shown at the bottom of the loading overlay.
+    GtkWidget* loadingLogLabel_ = nullptr;
     GtkWidget* progressBox_ = nullptr;
     GtkWidget* progressLabel_ = nullptr;
     GtkWidget* progressBar_ = nullptr;
@@ -75,6 +78,14 @@ private:
     static gboolean OnPollServer(gpointer userData);
     void OnServerReady();
     void OnServerFailed();
+    // Reads bytes newly appended to the server log files (stdout + stderr),
+    // updating the last-line label. Returns true when anything new arrived
+    // (the caller then resets the startup timeout countdown).
+    bool DrainServerLogs();
+    std::streamoff logPos_ = 0;     // stdout log read offset
+    std::streamoff logErrPos_ = 0;  // stderr log read offset
+    std::string logPending_;        // stdout unterminated tail
+    std::string logErrPending_;     // stderr unterminated tail
 
     // ---- node runtime auto-install ----
     void StartNodeAutoInstall();

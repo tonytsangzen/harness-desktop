@@ -61,6 +61,7 @@ const UINT kWM_UpdateAvailable = WM_APP + 8;
 const UINT kWM_UpdateFinished = WM_APP + 9;
 const UINT kWM_DownloadFailed = WM_APP + 10;
 const UINT kWM_BridgeLine = WM_APP + 11;
+const UINT kWM_OverlayLog = WM_APP + 12;
 
 const UINT_PTR kSpinnerTimer = 1;
 const UINT_PTR kRegisterTimerId = 2;
@@ -224,6 +225,7 @@ void WriteRegStr(const wchar_t* name, const std::wstring& value) {
 
 void PostOverlayStatus(const std::wstring& text) { PostString(kWM_OverlayStatus, text); }
 void PostOverlayProgress(int percent) { PostMessageW(MainWindow::Instance().Hwnd(), kWM_OverlayProgress, percent == -1 ? 0xFFFFFFFF : static_cast<WPARAM>(percent), 0); }
+void PostOverlayLog(const std::wstring& line) { PostString(kWM_OverlayLog, line); }
 void PostDownloadStatus(long long received, long long total, const std::wstring& filename) {
     auto* info = new DownloadStatusInfo{ received, total, filename };
     PostMessageW(MainWindow::Instance().Hwnd(), kWM_DownloadStatus, 0, reinterpret_cast<LPARAM>(info));
@@ -342,6 +344,16 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                     FillRect(dc, &fillRc, accent);
                     DeleteObject(accent);
                 }
+            }
+
+            // Last server log line, single line at the bottom of the overlay.
+            if (!inst.OverlayLog().empty()) {
+                RECT logRc = rc;
+                logRc.top = rc.bottom - 36;
+                logRc.left += 16;
+                logRc.right -= 16;
+                DrawTextW(dc, inst.OverlayLog().c_str(), -1, &logRc,
+                          DT_LEFT | DT_NOPREFIX | DT_SINGLELINE | DT_END_ELLIPSIS);
             }
 
             SelectObject(dc, oldFont);
@@ -701,6 +713,11 @@ void MainWindow::SetOverlayProgress(int percent) {
     if (overlayHwnd_) InvalidateRect(overlayHwnd_, nullptr, FALSE);
 }
 
+void MainWindow::SetOverlayLog(const std::wstring& line) {
+    overlayLog_ = line;
+    if (overlayHwnd_) InvalidateRect(overlayHwnd_, nullptr, FALSE);
+}
+
 void MainWindow::ShowDownloadBar() {
     downloadBarVisible_ = true;
     LayoutChildWindows();
@@ -996,6 +1013,10 @@ DWORD WINAPI MainWindow::EnsureNodeAndStartServer(LPVOID /*param*/) {
         return 1;
     }
 
+    // Forward each new server log line to the loading overlay (last line
+    // shown at the bottom); WaitUntilReady also resets its countdown on them.
+    ServerManager::SetLogHandler([](const std::wstring& line) { PostOverlayLog(line); });
+
     if (!ServerManager::WaitUntilReady(15 * 60 * 1000)) {
         PostOverlayStatus(L"Timed out waiting for the dsh server.");
         PostServerFailed();
@@ -1049,6 +1070,7 @@ DWORD WINAPI MainWindow::RefreshUpdate(LPVOID /*param*/) {
         PostUpdateFinished(false);
         return 1;
     }
+    ServerManager::SetLogHandler([](const std::wstring& line) { PostOverlayLog(line); });
     if (!ServerManager::WaitUntilReady(10 * 60 * 1000)) {
         PostUpdateFinished(false);
         return 1;
@@ -1125,6 +1147,13 @@ void MainWindow::OnOverlayStatus(const std::wstring* text) {
     }
 }
 
+void MainWindow::OnOverlayLog(const std::wstring* line) {
+    if (line) {
+        SetOverlayLog(*line);
+        delete line;
+    }
+}
+
 void MainWindow::OnOverlayProgress(WPARAM encoded) {
     int percent = encoded == 0xFFFFFFFF ? -1 : static_cast<int>(encoded);
     if (percent != overlayPercent_) {
@@ -1184,6 +1213,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_DESTROY: OnDestroy(); return 0;
         case kWM_OverlayStatus: OnOverlayStatus(reinterpret_cast<std::wstring*>(lParam)); return 0;
         case kWM_OverlayProgress: OnOverlayProgress(wParam); return 0;
+        case kWM_OverlayLog: OnOverlayLog(reinterpret_cast<std::wstring*>(lParam)); return 0;
         case kWM_DownloadStatus: OnDownloadStatus(reinterpret_cast<DownloadStatusInfo*>(lParam)); return 0;
         case kWM_ShowDownloadBar: OnShowDownloadBar(); return 0;
         case kWM_HideDownloadBar: OnHideDownloadBar(); return 0;

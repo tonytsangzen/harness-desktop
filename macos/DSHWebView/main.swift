@@ -194,7 +194,11 @@ struct Settings {
 
         var host = defaultHost
         var port = defaultPort
-        var command = ["npx", "--yes", "@deepseek-ai/dsh", "web"]
+        // --verbose (an npx/npm flag, before the package name) makes npx print
+        // its install/resolution log to stdout; the shell captures it, shows
+        // the last line on the loading screen, and resets the startup timeout
+        // while output keeps arriving.
+        var command = ["npx", "--yes", "--verbose", "@deepseek-ai/dsh", "web"]
 
         if let envHost = environment["DSH_WEBVIEW_HOST"], !envHost.isEmpty {
             host = envHost
@@ -231,7 +235,7 @@ struct Settings {
         // Append the resolved host/port onto the dsh web invocation so the
         // server and the webview agree, unless the caller supplied a full
         // custom command (which we take at face value).
-        if command == ["npx", "--yes", "@deepseek-ai/dsh", "web"] {
+        if command == ["npx", "--yes", "--verbose", "@deepseek-ai/dsh", "web"] {
             command.append(contentsOf: ["--host", host, "--port", String(port)])
         }
 
@@ -246,7 +250,7 @@ private func usageText() -> String {
     """
     Usage: DSHWebView [--host <host>] [--port <port>] [--command "<cmd>"] [--help]
 
-    Wraps the DeepSeek Harness web UI (`npx @deepseek-ai/dsh web`) in a native
+    Wraps the DeepSeek Harness web UI (`npx --yes --verbose @deepseek-ai/dsh web`) in a native
     macOS WKWebView window.
 
       --host <host>      Host for the dsh web server (default: 127.0.0.1)
@@ -280,9 +284,32 @@ final class ServerManager {
     /// The URL the webview should load for this launch.
     var activeURL: URL { URL(string: "http://\(settings.host):\(activePort)/")! }
 
+    /// Called with each chunk of the child's stdout/stderr. The startup screen
+    /// uses it to show the latest log line and to reset the readiness timeout.
+    var onLog: ((String) -> Void)?
+
+    /// Guards `lastActivity` (the log handler runs on a background pipe queue,
+    /// while `probe` runs on the main run loop).
+    private let activityLock = NSLock()
+    private var lastActivity = Date()
+
     init(settings: Settings) {
         self.settings = settings
         self.activePort = settings.port
+    }
+
+    /// Stamp the last-log/start activity timestamp.
+    private func markActivity() {
+        activityLock.lock()
+        lastActivity = Date()
+        activityLock.unlock()
+    }
+
+    /// Seconds since the last activity (start or log output).
+    private func idleDuration() -> TimeInterval {
+        activityLock.lock()
+        defer { activityLock.unlock() }
+        return Date().timeIntervalSince(lastActivity)
     }
 
     /// Spawn the server process. Streams its output to the app's stdout so
@@ -339,14 +366,18 @@ final class ServerManager {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             if let text = String(data: handle.availableData, encoding: .utf8), !text.isEmpty {
                 FileHandle.standardOutput.write(Data(text.utf8))
+                self?.markActivity()
+                self?.onLog?(text)
             }
         }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             if let text = String(data: handle.availableData, encoding: .utf8), !text.isEmpty {
                 FileHandle.standardError.write(Data(text.utf8))
+                self?.markActivity()
+                self?.onLog?(text)
             }
         }
 
@@ -364,13 +395,15 @@ final class ServerManager {
     }
 
     /// Probe the server until it accepts connections, calling `completion` on
-    /// success or `failure` after the timeout elapses.
+    /// success or `failure` after the timeout elapses. The countdown resets
+    /// whenever the child emits log output, so a slow-but-progressing startup
+    /// (e.g. npx installing the dsh package) isn't killed by the timeout.
     func waitUntilReady(timeout: TimeInterval, completion: @escaping () -> Void, failure: @escaping () -> Void) {
-        let deadline = Date().addingTimeInterval(timeout)
-        probe(deadline: deadline, completion: completion, failure: failure)
+        markActivity()
+        probe(timeout: timeout, completion: completion, failure: failure)
     }
 
-    private func probe(deadline: Date, completion: @escaping () -> Void, failure: @escaping () -> Void) {
+    private func probe(timeout: TimeInterval, completion: @escaping () -> Void, failure: @escaping () -> Void) {
         if self.process == nil && !self.reusingInstance {
             // The child already exited before we could connect.
             failure()
@@ -380,12 +413,13 @@ final class ServerManager {
             completion()
             return
         }
-        if Date() >= deadline {
+        // No log output and no ready port for the whole timeout: stuck.
+        if idleDuration() >= timeout {
             failure()
             return
         }
         probeTimer = Timer.scheduledTimer(withTimeInterval: probeIntervalSeconds, repeats: false) { [weak self] _ in
-            self?.probe(deadline: deadline, completion: completion, failure: failure)
+            self?.probe(timeout: timeout, completion: completion, failure: failure)
         }
     }
 
@@ -1311,6 +1345,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var activeDownloads: [WKDownload: NSKeyValueObservation] = [:]
     private var nativeDownloadObservation: NSKeyValueObservation?
     private var loadingOverlay: NSView?
+    private var loadingLogLabel: NSTextField?
+    /// Rolling tail of the server's stdout/stderr; the startup screen shows
+    /// only its last line ("text after the last \n").
+    private var pendingLogTail = ""
     private let updateManager = DSHUpdateManager()
     private var updateCheckInFlight = false
     private var mobileRemote: MobileRemoteManager?
@@ -1383,6 +1421,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         self.settings = settings
         self.server = ServerManager(settings: settings)
         super.init()
+        // Feed the server's stdout/stderr into the loading screen (last line
+        // only). Also reset by ServerManager the readiness timeout per output.
+        self.server.onLog = { [weak self] text in
+            self?.handleServerLog(text)
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -2440,21 +2483,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         label.translatesAutoresizingMaskIntoConstraints = false
         overlay.addSubview(label)
 
+        // Last server log line, pinned to the bottom of the startup screen
+        // (single line, truncated on the right).
+        let logLabel = NSTextField(labelWithString: "")
+        logLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        logLabel.textColor = .secondaryLabelColor
+        logLabel.lineBreakMode = .byTruncatingTail
+        logLabel.translatesAutoresizingMaskIntoConstraints = false
+        overlay.addSubview(logLabel)
+
         NSLayoutConstraint.activate([
             spinner.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: overlay.centerYAnchor, constant: -16),
             label.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
             label.topAnchor.constraint(equalTo: spinner.bottomAnchor, constant: 12),
+            logLabel.leadingAnchor.constraint(equalTo: overlay.leadingAnchor, constant: 16),
+            logLabel.trailingAnchor.constraint(equalTo: overlay.trailingAnchor, constant: -16),
+            logLabel.bottomAnchor.constraint(equalTo: overlay.bottomAnchor, constant: -12),
         ])
         spinner.startAnimation(nil)
+        loadingLogLabel = logLabel
 
         overlay.layer?.zPosition = 10
         container.addSubview(overlay, positioned: .above, relativeTo: container.subviews.first)
         loadingOverlay = overlay
     }
 
+    /// Keep only the last log line visible on the startup screen: append to a
+    /// rolling tail, then show the text after the last newline.
+    private func handleServerLog(_ text: String) {
+        pendingLogTail += text
+        if pendingLogTail.count > 8192 {
+            pendingLogTail = String(pendingLogTail.suffix(4096))
+        }
+        let lastLine = pendingLogTail
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .last
+            .map(String.init) ?? ""
+        let trimmed = lastLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.loadingLogLabel?.stringValue = trimmed
+        }
+    }
+
     private func dismissLoadingOverlay() {
         DispatchQueue.main.async { [weak self] in
+            self?.loadingLogLabel = nil
             self?.loadingOverlay?.removeFromSuperview()
             self?.loadingOverlay = nil
         }

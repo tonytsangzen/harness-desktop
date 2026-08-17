@@ -18,10 +18,13 @@
 #include <climits>
 #include <cstdio>
 #include <algorithm>
+#include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <signal.h>
 #include <sstream>
 #include <string>
+#include <system_error>
 
 #include <unistd.h>
 
@@ -337,6 +340,20 @@ void MainWindow::BuildUi() {
     gtk_widget_set_no_show_all(loadingHint_, TRUE);
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), loadingOverlay_);
 
+    // Last server log line, pinned to the bottom of the window while the
+    // loading overlay is up (single line, ellipsized).
+    loadingLogLabel_ = gtk_label_new("");
+    gtk_style_context_add_class(gtk_widget_get_style_context(loadingLogLabel_), "dim-label");
+    gtk_label_set_ellipsize(GTK_LABEL(loadingLogLabel_), PANGO_ELLIPSIZE_END);
+    gtk_label_set_xalign(GTK_LABEL(loadingLogLabel_), 0.0f);
+    gtk_widget_set_halign(loadingLogLabel_, GTK_ALIGN_FILL);
+    gtk_widget_set_valign(loadingLogLabel_, GTK_ALIGN_END);
+    gtk_widget_set_margin_start(loadingLogLabel_, 16);
+    gtk_widget_set_margin_end(loadingLogLabel_, 16);
+    gtk_widget_set_margin_bottom(loadingLogLabel_, 8);
+    gtk_widget_set_no_show_all(loadingLogLabel_, TRUE);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), loadingLogLabel_);
+
     // Download progress bar (hidden until a download starts).
     progressBox_ = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_container_set_border_width(GTK_CONTAINER(progressBox_), 4);
@@ -538,6 +555,8 @@ void MainWindow::SetLoadingOverlay(bool visible) {
         if (visible) gtk_widget_show(loadingOverlay_);
         else gtk_widget_hide(loadingOverlay_);
     }
+    // The log label is a separate overlay child; keep it tied to the overlay.
+    if (loadingLogLabel_ && !visible) gtk_widget_hide(loadingLogLabel_);
 }
 
 void MainWindow::SetDownloadProgressVisible(bool visible) {
@@ -606,6 +625,12 @@ gboolean MainWindow::OnPollServer(gpointer userData) {
         self->OnServerFailed();
         return G_SOURCE_REMOVE;
     }
+    // Drain the server logs: new output resets the timeout countdown (a slow
+    // but progressing start keeps emitting lines) and updates the last-line
+    // label at the bottom of the loading overlay.
+    if (self->DrainServerLogs()) {
+        self->pollStartedUs_ = g_get_monotonic_time();
+    }
     const gint64 elapsedUs = g_get_monotonic_time() - self->pollStartedUs_;
     if (elapsedUs > 180 * G_USEC_PER_SEC) {
         self->OnServerFailed();
@@ -626,6 +651,62 @@ gboolean MainWindow::OnPollServer(gpointer userData) {
         gtk_widget_show(self->loadingHint_);
     }
     return G_SOURCE_CONTINUE;
+}
+
+// Reads bytes newly appended to the server's stdout/stderr log files. Returns
+// true when anything new arrived; the last complete line (or the unterminated
+// tail, which is the latest output) is shown on the loading overlay.
+bool MainWindow::DrainServerLogs() {
+    bool grew = false;
+    std::string last;
+    auto drain = [&](const std::string& path, std::streamoff& pos, std::string& pending) {
+        std::error_code ec;
+        auto size = std::filesystem::file_size(path, ec);
+        if (ec || size <= pos) {
+            // Truncated/recreated (Start() truncates both files): restart.
+            if (!ec && size < pos) {
+                pos = 0;
+                pending.clear();
+            }
+            return;
+        }
+        grew = true;
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return;
+        f.seekg(pos);
+        std::string chunk((std::istreambuf_iterator<char>(f)),
+                          std::istreambuf_iterator<char>());
+        pos = size;
+        if (pending.size() + chunk.size() > 8192) {
+            pending = pending.substr(pending.size() > 4096 ? pending.size() - 4096 : 0);
+        }
+        pending += chunk;
+        size_t nl;
+        while ((nl = pending.find('\n')) != std::string::npos) {
+            std::string line = pending.substr(0, nl);
+            pending.erase(0, nl + 1);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            if (!line.empty()) last = line;
+        }
+    };
+    drain(ServerManager::LogPath(), logPos_, logPending_);
+    drain(ServerManager::LogPath() + ".err", logErrPos_, logErrPending_);
+    if (!grew) return false;
+
+    // Prefer an unterminated tail (latest output) over the last complete line.
+    if (!logErrPending_.empty()) {
+        last = logErrPending_;
+    } else if (!logPending_.empty()) {
+        last = logPending_;
+    }
+    while (!last.empty() && (last.back() == '\n' || last.back() == '\r')) {
+        last.pop_back();
+    }
+    if (!last.empty() && loadingLogLabel_) {
+        gtk_label_set_text(GTK_LABEL(loadingLogLabel_), last.c_str());
+        if (!gtk_widget_get_visible(loadingLogLabel_)) gtk_widget_show(loadingLogLabel_);
+    }
+    return true;
 }
 
 void MainWindow::OnServerReady() {

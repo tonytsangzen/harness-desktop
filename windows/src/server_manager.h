@@ -33,7 +33,16 @@ void Stop();
 
 // Polls the port until the server responds or the timeout elapses.
 // Returns true when ready. `onWaiting` is invoked periodically while waiting.
+// The countdown is reset whenever the child writes new log output, so a
+// slow-but-progressing startup (e.g. npx installing the dsh package) isn't
+// killed by the timeout. Each complete log line is forwarded to the handler
+// set with SetLogHandler (called on the calling thread).
 bool WaitUntilReady(int timeoutMs, const std::function<void()>& onWaiting = {});
+
+// Sets the handler invoked (on the WaitUntilReady caller's thread) with each
+// complete line of the server's stdout/stderr. The UI uses it to show the
+// last line on the loading screen.
+void SetLogHandler(const std::function<void(const std::wstring&)>& handler);
 
 unsigned short Port();
 std::wstring Host();

@@ -51,6 +51,9 @@ private:
 
     std::wstring overlayText_;
     int overlayPercent_ = -1;
+    // Last line of the server's stdout/stderr, drawn at the bottom of the
+    // loading overlay (updated while the server starts).
+    std::wstring overlayLog_;
 
     Theme theme_ = Theme::System;
     Lang lang_ = Lang::System;
@@ -84,6 +87,7 @@ private:
     void ShowOverlay();
     void SetOverlayText(const std::wstring& text);
     void SetOverlayProgress(int percent); // -1 = indeterminate
+    void SetOverlayLog(const std::wstring& line); // last server log line
     void ShowDownloadBar();
     void HideDownloadBar();
     void UpdateDownloadBar();
@@ -120,6 +124,7 @@ private:
     // Message handlers.
     void OnOverlayStatus(const std::wstring* text);
     void OnOverlayProgress(WPARAM encoded);
+    void OnOverlayLog(const std::wstring* line);
     void OnDownloadStatus(const DownloadStatusInfo* info);
     void OnShowDownloadBar();
     void OnHideDownloadBar();
@@ -146,6 +151,7 @@ public:
     // Read access for the overlay / download child window paint procs.
     const std::wstring& OverlayText() const { return overlayText_; }
     int OverlayPercent() const { return overlayPercent_; }
+    const std::wstring& OverlayLog() const { return overlayLog_; }
     int SpinnerFrame() const { return spinnerFrame_; }
     const std::wstring& DownloadFilename() const { return download_.filename; }
     long long DownloadReceived() const { return download_.received; }
@@ -156,6 +162,7 @@ public:
 // PostMessage helpers shared with worker threads.
 void PostOverlayStatus(const std::wstring& text);
 void PostOverlayProgress(int percent);
+void PostOverlayLog(const std::wstring& line);
 void PostDownloadStatus(long long received, long long total, const std::wstring& filename);
 void PostShowDownloadBar();
 void PostHideDownloadBar();

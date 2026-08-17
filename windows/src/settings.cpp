@@ -9,7 +9,7 @@ namespace dsh {
 
 const wchar_t* kUsageText = L"Usage: DSHWebView [--host <host>] [--port <port>] [--command \"<cmd>\"] [--help]\n"
     L"\n"
-    L"Wraps the DeepSeek Harness web UI (`npx @deepseek-ai/dsh web`) in a native\n"
+    L"Wraps the DeepSeek Harness web UI (`npx --yes --verbose @deepseek-ai/dsh web`) in a native\n"
     L"Windows WebView2 window.\n"
     L"\n"
     L"  --host <host>      Host for the dsh web server (default: 127.0.0.1)\n"
@@ -66,10 +66,10 @@ Settings Settings::Parse(const std::vector<std::wstring>& args) {
     }
 
     // Keep the webview and the server in agreement for the default command
-    // (`npx --yes @deepseek-ai/dsh web ...`).
-    bool isDefaultNpx = s.command.size() == 4 && s.command[0] == L"npx" &&
-                        s.command[1] == L"--yes" && s.command[2] == L"@deepseek-ai/dsh" &&
-                        s.command[3] == L"web";
+    // (`npx --yes --verbose @deepseek-ai/dsh web ...`).
+    bool isDefaultNpx = s.command.size() == 5 && s.command[0] == L"npx" &&
+                        s.command[1] == L"--yes" && s.command[2] == L"--verbose" &&
+                        s.command[3] == L"@deepseek-ai/dsh" && s.command[4] == L"web";
     if (!s.customCommand && isDefaultNpx) {
         s.command.push_back(L"--host");
         s.command.push_back(s.host);

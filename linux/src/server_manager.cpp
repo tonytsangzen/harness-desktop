@@ -158,6 +158,14 @@ bool Start() {
     std::string logPath = LogPath();
     std::string logErr = LogErrPath();
 
+    // Fresh logs for this run: truncate in the parent so the incremental
+    // log reader on the UI never sees a previous run's output (the child's
+    // O_TRUNC at exec is a second, harmless truncate).
+    for (const char* p : { logPath.c_str(), logErr.c_str() }) {
+        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) close(fd);
+    }
+
     pid_t pid = fork();
     if (pid < 0) {
         g_printerr("dshwebview: fork failed: %s\n", std::strerror(errno));
