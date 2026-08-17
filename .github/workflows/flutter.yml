@@ -2,8 +2,9 @@
 #   - Android: release APK (uploaded as `android-apk`)
 #   - iOS:     unsigned Runner.app zipped as `ios-app` (--no-codesign)
 #
-# On a v* tag the artifacts are picked up by the `attach` job in release.yml
-# and attached to the GitHub Release automatically.
+# On a v* tag the `attach-mobile` job uploads both to the GitHub Release
+# itself (release.yml's attach job runs in parallel and cannot wait for
+# these artifacts).
 #
 # Notes:
 #   * The Android APK is signed with the default debug keystore so it can be
@@ -88,3 +89,25 @@ jobs:
           name: ios-app
           path: mobile/app/dsh-mobile-ios.app.zip
           if-no-files-found: error
+
+  attach-mobile:
+    name: Attach mobile artifacts to release
+    needs: [android, ios]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: mobile-artifacts
+      - name: Upload APK + iOS zip to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          mv mobile-artifacts/android-apk/app-release.apk "mobile-artifacts/dsh-mobile-${tag}.apk"
+          mv mobile-artifacts/ios-app/dsh-mobile-ios.app.zip "mobile-artifacts/dsh-mobile-${tag}-ios.app.zip"
+          gh release upload "$GITHUB_REF_NAME" \
+            "mobile-artifacts/dsh-mobile-${tag}.apk" \
+            "mobile-artifacts/dsh-mobile-${tag}-ios.app.zip" --clobber
