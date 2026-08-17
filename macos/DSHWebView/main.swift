@@ -193,7 +193,7 @@ struct Settings {
 
         var host = defaultHost
         var port = defaultPort
-        var command = ["npx", "@deepseek-ai/dsh", "web"]
+        var command = ["npx", "--yes", "@deepseek-ai/dsh", "web"]
 
         if let envHost = environment["DSH_WEBVIEW_HOST"], !envHost.isEmpty {
             host = envHost
@@ -230,7 +230,7 @@ struct Settings {
         // Append the resolved host/port onto the dsh web invocation so the
         // server and the webview agree, unless the caller supplied a full
         // custom command (which we take at face value).
-        if command == ["npx", "@deepseek-ai/dsh", "web"] {
+        if command == ["npx", "--yes", "@deepseek-ai/dsh", "web"] {
             command.append(contentsOf: ["--host", host, "--port", String(port)])
         }
 
@@ -324,6 +324,13 @@ final class ServerManager {
             let existing = environment["PATH"] ?? ""
             environment["PATH"] = "\(binDir):\(existing)"
         }
+        // Never let npx block on its interactive "Ok to proceed? (y)" prompt
+        // when the @deepseek-ai/dsh package needs installing on first launch
+        // (a GUI app has no terminal to answer it, so the server would never
+        // start and the webview would hang). Mirrors Windows/Linux shells.
+        environment["npm_config_yes"] = "true"
+        environment["npm_config_fund"] = "false"
+        environment["npm_config_update_notifier"] = "false"
         process.environment = environment
 
         let stdoutPipe = Pipe()

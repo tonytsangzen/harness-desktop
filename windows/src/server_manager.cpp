@@ -89,21 +89,24 @@ std::wstring PrepareCommandLine() {
 
     std::vector<std::wstring> argv = g_settings.command;
 
-    // When the command is the standard `npx @deepseek-ai/dsh web ...` form and
-    // a cached copy of @deepseek-ai/dsh exists, run it directly with node.
-    // This skips npx's online registry revalidation, so startup never waits on
-    // the network. A newer release is surfaced later by the background update
-    // check (DshUpdateManager) running on its own thread.
+    // When the command is the standard `npx --yes @deepseek-ai/dsh web ...`
+    // form and a cached copy of @deepseek-ai/dsh exists, run it directly with
+    // node. This skips npx's online registry revalidation, so startup never
+    // waits on the network. A newer release is surfaced later by the
+    // background update check (DshUpdateManager) running on its own thread.
+    bool hasYes = argv.size() >= 3 && argv[1] == L"--yes";
     bool defaultNpxForm = argv.size() >= 2 &&
                           (argv[0] == L"npx" || argv[0] == L"npx.cmd") &&
-                          argv[1] == L"@deepseek-ai/dsh";
+                          (argv[1] == L"@deepseek-ai/dsh" ||
+                           (hasYes && argv[2] == L"@deepseek-ai/dsh"));
     if (defaultNpxForm) {
         auto dshDir = FindCachedDshDir();
         auto node = NodeRuntimeManager::NodePath();
         auto bin = JoinPath(dshDir, L"lib\\bin.js");
         if (!dshDir.empty() && !node.empty() && FileExists(bin)) {
             std::wstring direct = QuoteArg(node) + L" " + QuoteArg(bin);
-            for (size_t i = 2; i < argv.size(); i++) {
+            size_t start = hasYes ? 3 : 2;  // skip npx [--yes] @deepseek-ai/dsh
+            for (size_t i = start; i < argv.size(); i++) {
                 direct += L" " + QuoteArg(argv[i]);
             }
             return direct;

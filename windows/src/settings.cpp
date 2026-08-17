@@ -65,9 +65,11 @@ Settings Settings::Parse(const std::vector<std::wstring>& args) {
         }
     }
 
-    // Keep the webview and the server in agreement for the default command.
-    bool isDefaultNpx = s.command.size() == 3 && s.command[0] == L"npx" &&
-                        s.command[1] == L"@deepseek-ai/dsh" && s.command[2] == L"web";
+    // Keep the webview and the server in agreement for the default command
+    // (`npx --yes @deepseek-ai/dsh web ...`).
+    bool isDefaultNpx = s.command.size() == 4 && s.command[0] == L"npx" &&
+                        s.command[1] == L"--yes" && s.command[2] == L"@deepseek-ai/dsh" &&
+                        s.command[3] == L"web";
     if (!s.customCommand && isDefaultNpx) {
         s.command.push_back(L"--host");
         s.command.push_back(s.host);

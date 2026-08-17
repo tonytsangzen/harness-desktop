@@ -10,7 +10,7 @@ namespace dsh {
 struct Settings {
     std::wstring host = L"127.0.0.1";
     unsigned short port = 3080;
-    std::vector<std::wstring> command{ L"npx", L"@deepseek-ai/dsh", L"web" };
+    std::vector<std::wstring> command{ L"npx", L"--yes", L"@deepseek-ai/dsh", L"web" };
     bool customCommand = false;
 
     std::wstring Url() const { return L"http://" + host + L":" + std::to_wstring(port) + L"/"; }
