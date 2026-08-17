@@ -20,6 +20,8 @@
 #include <wrl/event.h>
 #include <webview2.h>
 #include <gdiplus.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <wincrypt.h>
 #include <iphlpapi.h>
 #include <iptypes.h>
@@ -1360,34 +1362,33 @@ std::string SaveBitmapPng(Gdiplus::Bitmap* bmp) {
 
 // First non-loopback IPv4 address in a private range (LAN direct connect),
 // mirroring the macOS shell so the phone can prefer a direct LAN connection.
+// Uses winsock getaddrinfo on the hostname (no iphlpapi dependency, which is
+// conditionally compiled in some SDK configurations).
 std::string LocalLANAddress() {
+    char hostname[256] = {};
+    if (gethostname(hostname, sizeof(hostname)) != 0) return "";
+    addrinfo hints = {};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* res = nullptr;
+    if (getaddrinfo(hostname, nullptr, &hints, &res) != 0) return "";
     std::string result;
-    ULONG size = 0;
-    GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                       GAA_FLAG_SKIP_DNS_SERVER,
-                         nullptr, nullptr, &size);
-    if (size == 0) return "";
-    std::vector<BYTE> buf(size);
-    PIP_ADAPTER_ADDRESSES addrs = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data());
-    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
-                                          GAA_FLAG_SKIP_DNS_SERVER,
-                             nullptr, addrs, &size) != NO_ERROR) {
-        return "";
-    }
-    for (PIP_ADAPTER_ADDRESSES a = addrs; a; a = a->Next) {
-        if (a->OperStatus != IfOperStatusUp) continue;
-        for (PIP_ADAPTER_UNICAST_ADDRESS u = a->FirstUnicastAddress; u; u = u->Next) {
-            if (u->Address.lpSockaddr->sa_family != AF_INET) continue;
-            auto* sin = reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr);
-            char ip[INET_ADDRSTRLEN] = {};
-            inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
-            std::string s = ip;
-            if (s.rfind("192.168.", 0) == 0) return s; // prefer 192.168.*
-            if (s.rfind("10.", 0) == 0 || s.rfind("172.", 0) == 0) {
-                if (result.empty()) result = s;
-            }
+    for (addrinfo* p = res; p; p = p->ai_next) {
+        auto* sin = reinterpret_cast<sockaddr_in*>(p->ai_addr);
+        char ip[INET_ADDRSTRLEN] = {};
+        inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
+        std::string s = ip;
+        if (s.rfind("192.168.", 0) == 0) {  // prefer 192.168.*
+            freeaddrinfo(res);
+            return s;
+        }
+        if (result.empty() && (s.rfind("10.", 0) == 0 ||
+                               (s.rfind("172.", 0) == 0))) {
+            // Keep 10/8 and 172.16/12 as fallbacks (172.x check below).
+            result = s;
         }
     }
+    freeaddrinfo(res);
     return result;
 }
 

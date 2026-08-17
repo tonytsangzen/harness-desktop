@@ -1210,8 +1210,8 @@ void MainWindow::OnMobileRemoteActivate(GtkWidget* /*item*/, gpointer userData) 
     std::string qrContent = PairingQRContent(self->mobileRelayUrl_, deviceId, lan);
     std::string qrPNG = GenerateQRPNG(qrContent);
     if (qrPNG.empty()) {
-        self->ShowError(IsChinese() ? "生成配对二维码失败。"
-                                    : "Failed to generate the pairing QR code.");
+        self->ShowError(self->IsChinese() ? "生成配对二维码失败。"
+                                          : "Failed to generate the pairing QR code.");
         return;
     }
     self->deviceId_ = deviceId;
@@ -1315,7 +1315,7 @@ gboolean MainWindow::OnBridgeOutput(GIOChannel* channel, GIOCondition cond, gpoi
         if (end == std::string::npos) return "";
         return line.substr(pos, end - pos);
     };
-    auto eventOf = [](const std::string& line) -> std::string {
+    auto eventOf = [&fieldOf](const std::string& line) -> std::string {
         return fieldOf(line, "event");
     };
 
