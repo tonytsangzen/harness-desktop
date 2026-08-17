@@ -146,7 +146,7 @@ jobs:
         run: |
           & "$PWD/wix/heat.exe" dir mobile/bridge `
             -cg BridgeComponents -gg -scom -sfrag -template:fragment `
-            -dr INSTALLFOLDER -var var.BridgeDir -out bridge.wxs
+            -dr INSTALLFOLDER -var var.BridgeDir -out bridge.wxs -arch x64
           if ($LASTEXITCODE -ne 0) { throw "heat failed" }
 
       - name: Build MSI installer (WiX v3)
