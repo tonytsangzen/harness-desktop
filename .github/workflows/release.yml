@@ -113,6 +113,9 @@ jobs:
         working-directory: mobile/bridge
         run: npm ci
 
+      - name: Prune mobile bridge (drop dev-only files)
+        run: node mobile/bridge/prune.mjs mobile/bridge
+
       - name: Configure (VS generator, ${{ matrix.arch }})
         shell: pwsh
         run: |
@@ -260,6 +263,9 @@ jobs:
       - name: Install mobile bridge dependencies
         working-directory: mobile/bridge
         run: npm ci
+
+      - name: Prune mobile bridge (drop dev-only files)
+        run: node mobile/bridge/prune.mjs mobile/bridge
 
       - name: Configure (Ninja, Release)
         run: |

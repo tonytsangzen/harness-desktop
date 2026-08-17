@@ -54,9 +54,13 @@ cp "${UNIVERSAL_BIN}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 cp AppIcon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
 
 # Ship the mobile relay bridge (Node script + its pure-JS dependencies) so
-# the "Mobile Remote" menu can spawn it from the bundle resources.
+# the "Mobile Remote" menu can spawn it from the bundle resources. The bridge
+# needs Node/npx at runtime, so prune the packaged node_modules down to what
+# actually runs (drop source maps / TS sources / docs — werift & its media
+# stack no longer ship, so node_modules is only the ws dependency).
 cp -R mobile/bridge "${APP_DIR}/Contents/Resources/bridge"
 rm -f "${APP_DIR}/Contents/Resources/bridge/package-lock.json"
+node mobile/bridge/prune.mjs "${APP_DIR}/Contents/Resources/bridge"
 
 # Write Info.plist with the resolved version stamped in.
 sed -e "s|<string>1.1.6</string>|<string>${VERSION}</string>|g" Info.plist \

@@ -279,66 +279,20 @@ Device:
 - [ ] `refresh` 端点路径（本稿 `pair/refresh`，可并入 `session/refresh`）
 - [ ] 事件子集是否需要 Host 侧过滤（减少 App 流量）——默认透传，App 端过滤
 
-## 9. WebRTC P2P（外网直连，穿透失败回退中继）
+## 9. 连接模式（2026-08 起：外网一律走中继）
 
-三级连接模式：① 内网直连（bridge LAN 代理 `0.0.0.0:13080` → 本机 dsh）→
-② 外网 WebRTC P2P（手机 flutter_webrtc ↔ 电脑 bridge werift，信令经 relay）
-→ ③ 穿透失败回退中继隧道。
+两级连接模式：① 内网直连（bridge LAN 代理 `0.0.0.0:13080` → 本机 dsh）→
+② 其余全部走中继隧道。
 
-### 9.1 信令帧（type="signal"，channel 绑定复用）
+**WebRTC P2P 已移除**（v1.1.7 起）：手机 flutter_webrtc ↔ 电脑 bridge
+werift 的 P2P 数据通道整体删除——werift 及其媒体依赖（mediabunny 等约
+26 MB）不再随 bridge 打包，`signal` 信令帧不再收发，手机端不再发起
+P2P 升级（「屏蔽 P2P」开关与连接指示一并移除）。外网流量只经 relay
+隧道（§5 的 http/rpc/sse 帧），局域网内则优先 bridge LAN 直连代理。
 
-`{v:1, type:"signal", channel, kind, body}`，双向转发（relay 白名单已加
-device→host 与 host→device）。
-
-| kind | 方向 | body | 说明 |
-|---|---|---|---|
-| `p2p-offer` | device→host | `{sdp}` | 手机发起（含 data channel m-line） |
-| `p2p-answer` | host→device | `{sdp}` | bridge 应答 |
-| `ice` | 双向 | `{candidate:{candidate,sdpMid,sdpMLineIndex}}` | ICE 候选 |
-| `p2p-open` | host→device | `{}` | DataChannel 已建立 |
-| `p2p-error` | host→device | `{message}` | 协商失败 |
-
-要点：
-- 手机 offer 必须禁用 audio/video（flutter_webrtc 默认
-  `OfferToReceiveAudio/Video=true` 会生成 3 个 m-line，werift 单 data
-  组件无法协商）：`createOffer({mandatory:{OfferToReceiveAudio:false,
-  OfferToReceiveVideo:false}})` → 单 `m=application` m-line。
-- bridge 转发候选时把 werift 的 sdpMid 改写为 offer 中 data m-line 的 mid
-  （werift 全标 0，libwebrtc 需要挂到 data m-line）。
-- 信令经现有 relay 隧道（token 认证），无需新端点。
-
-### 9.2 DataChannel 帧协议（与隧道 http 帧子集一致）
-
-复用 §5 的 `http`/`http-reply`/`sse-open`/`sse-frame`/`sse-close` 帧语义：
-`{type:"http", id, method, path, headers, body(base64)}` ↔
-`{type:"http-reply", id, status, headers, body(base64)}`；
-`sse-open`(body.raw=true) → `sse-frame {channel,data}` → `sse-close`。
-
-**大数据分片（`http-reply`）**：WebRTC DataChannel 单消息受协商的
-max-message-size 限制（werift 默认 64 KiB，libwebrtc 通常 ≤256 KiB），而
-dsh 插件 bundle 达 50–430 KB（base64 后 68–570 KB），单帧会触发
-werift `dc.send` 抛 `max-message-size exceeded`。因此当响应体超过
-16 KiB 时，bridge 把 `http-reply` 拆成头部 + 若干 `http-chunk`：
-
-- 头部：`{type:"http-reply", id, status, chunked:true, total, body:{headers}}`
-- 分片：`{type:"http-chunk", id, index, data}`（`data` 为 base64 片段，
-  按 `index` 升序拼接回完整 `body`；DataChannel 有序可靠，同 `id` 分片
-  顺序到达，不同 `id` 可交错）。
-- 手机侧按 `id` 缓冲 `http-chunk`，收齐 `total` 片后拼出完整
-  `{status, body:{headers, body}}` 再完成该请求。
-- 未分片的 `http-reply`（≤16 KiB）不带 `chunked`，行为与 §5 一致。
-
-### 9.3 手机端升级/回退
-
-- 进入页面：先中继加载（秒开），后台 P2P connect（≤8s）→ 成功则
-  `WebProxy.useBackend(p2p)` 运行中切换，后续请求走直连。
-- P2P DataChannel 关闭 → `onClosed` 回调 → 切回中继隧道。
-- 失败/超时 → 保持中继。
-
-### 9.4 relay 连接保活（2026-08 修复）
+### 9.1 relay 连接保活（2026-08 修复）
 
 - relay 对 host/device 发文本 `{"v":1,"type":"ping"}`，对端回文本 pong。
 - **文本 pong 必须刷新读超时**（relay 的 SetPongHandler 只认协议层 pong，
   否则 90s 读超时踢掉 host 且因 socket 未关闭造成半开 → host-offline 永续）。
 - host handler 退出必须 `defer ws.Close()`（防连接泄漏）。
-- 手机侧 P2P 建立判据：`RTCDataChannelState.RTCDataChannelOpen`。

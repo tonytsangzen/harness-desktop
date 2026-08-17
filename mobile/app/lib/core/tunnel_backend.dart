@@ -1,6 +1,6 @@
-/// Backend abstraction for the WebView proxy: either the relay tunnel
-/// ([RelayClient]) or a direct WebRTC data channel ([P2pClient]). Both speak
-/// the same frame protocol, so the proxy is backend-agnostic.
+/// Backend abstraction for the WebView proxy: the relay tunnel ([RelayClient])
+/// or the LAN-direct path ([LanBackend]). Both speak the same frame protocol,
+/// so the proxy is backend-agnostic.
 library;
 
 

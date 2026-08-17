@@ -1,4 +1,4 @@
-/// Foreground-service bridge: keeps the tunnel (LAN proxy / P2P / relay)
+/// Foreground-service bridge: keeps the tunnel (LAN proxy / relay)
 /// alive when the UI goes to the background. On Android this raises the
 /// process priority so OEM battery savers don't kill the app mid-session.
 ///

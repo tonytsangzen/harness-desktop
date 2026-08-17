@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### 移除
+
+- **WebRTC P2P 直连整体下线（三端 + 手机端）**：外网远程访问一律走中继隧道。删除 bridge 的 werift（含其媒体依赖 mediabunny 等，`mobile/bridge` 依赖只剩 `ws`）、手机端 flutter_webrtc（`p2p_client.dart`、「屏蔽 P2P 直连」开关、连接指示 chip、信令 `signal` 帧全部移除）、以及开发探针 `mobile/p2p_probe`。LAN 内直连代理保留（非 WebRTC）。协议文档 §9 同步改写。
+- **bridge 打包瘦身（三端）**：新增 `mobile/bridge/prune.mjs`，打包时从 node_modules 剥离源码映射/TypeScript 源码/README/LICENSE 等纯开发文件；macOS `build-app.sh`、Windows/Linux CI 打包前均执行。桥依赖从 26 MB（werift 时代）降至约 0.2 MB（仅 ws），DMG 体积显著下降。
+
 ### 新增
 
 - **启动界面实时显示服务日志（三端）**：默认启动命令加 `--verbose`（npx/npm 参数，位于包名之前，不影响 dsh web 自身参数），捞回 npx/dsh 的 stdout/stderr。启动界面最下方只显示**最后一行**日志（macOS 加载遮罩底部 / Windows 加载遮罩底部 / Linux 加载遮罩底部），且**每有新日志输出就复位启动超时倒计时**——首次启动 npx 下载依赖等「慢但在推进」的场景不再被超时杀掉。

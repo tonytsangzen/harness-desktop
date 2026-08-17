@@ -51,7 +51,6 @@ class RelayClient implements TunnelBackend {
   final Map<String, void Function(String reason)> _sseClosers = {};
   final Map<String, Completer<Map<String, dynamic>>> _pendingHttp = {};
   final Map<String, void Function(String data)> _rawSseHandlers = {};
-  final List<void Function(Map<String, dynamic>)> _signalListeners = [];
 
   /// Fired with true when the tunnel is up, false when the socket drops.
   void Function(bool online)? onStatus;
@@ -181,36 +180,9 @@ class RelayClient implements TunnelBackend {
           });
         }
         break;
-      case 'signal':
-        // WebRTC signaling (SDP/ICE) forwarded by the relay; the P2P client
-        // subscribes via [onSignal].
-        final listeners = _signalListeners;
-        if (listeners.isNotEmpty) {
-          final copy = List<void Function(Map<String, dynamic>)>.of(listeners);
-          for (final fn in copy) {
-            try {
-              fn(f);
-            } catch (_) {
-              // a listener must never break the message loop
-            }
-          }
-        }
-        break;
       default:
         break;
     }
-  }
-
-  /// Subscribe to WebRTC signaling frames (type "signal") forwarded by the
-  /// relay. Returns an unsubscribe function.
-  void Function() onSignal(void Function(Map<String, dynamic> frame) fn) {
-    _signalListeners.add(fn);
-    return () => _signalListeners.remove(fn);
-  }
-
-  /// Send one WebRTC signaling frame through the relay tunnel.
-  void sendSignal(String channel, String kind, Map<String, dynamic> body) {
-    _send({'v': 1, 'type': 'signal', 'channel': channel, 'kind': kind, 'body': body});
   }
 
   Map<String, dynamic> _replyResult(Map<String, dynamic>? body) {

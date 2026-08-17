@@ -6,13 +6,16 @@
 // envelopes (client-request / client-response / server-request SSE) and back.
 // Pairing info is emitted on stdout as single-line JSON events the shell reads.
 //
+// All remote traffic goes through the relay tunnel (the WebRTC P2P data
+// channel was removed — werift no longer ships with the bridge), and phones on
+// the same LAN can load the desktop's dsh web directly through the LAN proxy.
+//
 // Usage: node bridge.mjs --relay wss://relay.example.com --dsh-port 3080
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { parseArgs } from "node:util";
 import { createServer, request as httpRequest } from "node:http";
 import { WebSocketServer } from "ws";
-import { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } from "werift";
 
 const args = parseArgs({
   options: {
@@ -209,7 +212,6 @@ function connect() {
       case "sse-open": handleSseOpen(frame); break;
       case "sse-close": handleSseClose(frame); break;
       case "respond": handleRespond(frame); break;
-      case "signal": handleSignal(frame).catch(() => {}); break;
       default: /* ignore */ break;
     }
   };
@@ -297,8 +299,7 @@ async function handleHttp(frame) {
   });
 }
 
-/// Proxy one HTTP request to the local dsh web; used by the relay tunnel
-/// (handleHttp) and the WebRTC data channel (handleP2PMessage).
+/// Proxy one HTTP request to the local dsh web (used by the relay tunnel).
 async function proxyHttp(method, path, headers, bodyBase64) {
   const init = { method, headers: headers || {}, signal: AbortSignal.timeout(8000) };
   if (bodyBase64 != null && bodyBase64 !== "") {
@@ -319,140 +320,6 @@ async function proxyHttp(method, path, headers, bodyBase64) {
       headers: { "content-type": "text/plain" },
       body: Buffer.from(String(err?.message || err)).toString("base64"),
     };
-  }
-}
-
-// ---- WebRTC P2P (werift) ---------------------------------------------------
-// Preferred path for phones outside the LAN: direct NAT-traversed WebRTC data
-// channel instead of bouncing traffic through the relay. Signaling (SDP/ICE)
-// travels over the existing relay tunnel frames (type "signal", channel-routed
-// both ways). The phone starts this: offer-request → offer → answer → ICE →
-// data channel open → HTTP frames over the channel. Failures fall back to the
-// relay tunnel on the phone side.
-let p2p = null; // { pc, dc, channel, sseStreams }
-
-function sendSignal(channel, kind, body) {
-  send({ v: 1, type: "signal", channel, kind, body: body || {} });
-}
-
-async function handleSignal(frame) {
-  const kind = frame.kind;
-  const channel = frame.channel;
-  const body = frame.body || {};
-  if (kind === "p2p-offer") {
-    // The phone initiates: its offer carries the data-channel m-line.
-    try {
-      if (p2p) {
-        try { p2p.pc.close(); } catch { /* ignore */ }
-        p2p = null;
-      }
-      const pc = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-      });
-      const dataMid = (() => {
-        const sdp = body.sdp || "";
-        const lines = sdp.split("\n");
-        for (let i = 0; i < lines.length; i++) {
-          if (/^m=application\s+\d+\s+UDP\/DTLS\/SCTP/.test(lines[i])) {
-            for (let j = i; j < lines.length && j < i + 8; j++) {
-              const m = lines[j].match(/^a=mid:(\S+)/);
-              if (m) return m[1];
-            }
-          }
-        }
-        return "0";
-      })();
-      p2p = { pc, channel, dc: null, sseStreams: new Map(), dataMid };
-      pc.addEventListener("icecandidate", (e) => {
-        if (e.candidate) {
-          const c = e.candidate.toJSON();
-          // werift tags every candidate with the first m-line; libwebrtc
-          // needs them on the data m-line or it never sees a usable pair.
-          c.sdpMid = p2p.dataMid;
-          sendSignal(channel, "ice", { candidate: c });
-        }
-      });
-
-      pc.ondatachannel = ({ channel: dc }) => {
-        p2p.dc = dc;
-        dc.onopen = () => sendSignal(channel, "p2p-open", {});
-        dc.onmessage = (ev) => {
-          handleP2PMessage(String(ev.data)).catch(() => {});
-        };
-        dc.onclose = () => {
-          if (p2p && p2p.dc === dc) p2p.dc = null;
-        };
-      };
-      await pc.setRemoteDescription(new RTCSessionDescription(body.sdp, "offer"));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      sendSignal(channel, "p2p-answer", { sdp: pc.localDescription.sdp });
-    } catch (err) {
-      sendSignal(channel, "p2p-error", { message: String(err?.message || err) });
-    }
-  } else if (kind === "ice" && p2p) {
-    await p2p.pc.addIceCandidate(new RTCIceCandidate(body.candidate));
-  }
-}
-
-// WebRTC data channels cap a single message at the negotiated max-message-size
-// (werift's default is 64 KiB, and libwebrtc typically advertises ≤256 KiB).
-// dsh plugin bundles are 50–430 KB (base64 ~68–570 KB), so an `http-reply` for
-// one of them exceeds the limit and werift's `dc.send` throws
-// "max-message-size exceeded". That throw used to be swallowed by the caller,
-// so the phone never got a reply, timed out after 30s, and the WebView failed
-// the bundle <script> → the shell rendered "Failed to load plugins". Chunk
-// large replies into ≤16 KiB base64 pieces the phone reassembles.
-const P2P_HTTP_CHUNK = 16000;
-
-function sendP2PHttpReply(id, resp) {
-  const body = resp.body || "";
-  const send = (frame) => p2p.dc.send(JSON.stringify(frame));
-  if (body.length <= P2P_HTTP_CHUNK) {
-    send({ type: "http-reply", id, status: resp.status, body: { headers: resp.headers, body } });
-    return;
-  }
-  const chunks = [];
-  for (let i = 0; i < body.length; i += P2P_HTTP_CHUNK) chunks.push(body.slice(i, i + P2P_HTTP_CHUNK));
-  send({ type: "http-reply", id, status: resp.status, chunked: true, total: chunks.length, body: { headers: resp.headers } });
-  for (let i = 0; i < chunks.length; i++) send({ type: "http-chunk", id, index: i, data: chunks[i] });
-}
-
-async function handleP2PMessage(text) {
-  let msg;
-  try { msg = JSON.parse(text); } catch { return; }
-  if (!p2p?.dc || p2p.dc.readyState !== "open") return;
-  if (msg.type === "http") {
-    const resp = await proxyHttp(msg.method || "GET", msg.path, msg.headers, msg.body);
-    sendP2PHttpReply(msg.id, resp);
-  } else if (msg.type === "sse-open") {
-    const wsUrl = DSH_BASE.replace(/^http/, "ws") + msg.path;
-    let up;
-    try {
-      up = new WebSocket(wsUrl);
-    } catch (err) {
-      p2p.dc.send(JSON.stringify({ type: "sse-close", channel: msg.channel, body: { reason: "error" } }));
-      return;
-    }
-    const stream = { channel: msg.channel, ws: up };
-    p2p.sseStreams.set(msg.channel, stream);
-    up.onmessage = (ev) => {
-      if (p2p.dc && p2p.dc.readyState === "open") {
-        try {
-          p2p.dc.send(JSON.stringify({ type: "sse-frame", channel: msg.channel, data: String(ev.data) }));
-        } catch (err) {
-          // An event larger than the data-channel max-message-size can't be
-          // sent; drop it rather than crashing the bridge (the phone re-syncs
-          // on the next reload).
-          console.error(`[p2p] sse-frame dropped for ${msg.channel}: ${err?.message || err}`);
-        }
-      }
-    };
-    up.onclose = () => { if (p2p.sseStreams.get(msg.channel) === stream) p2p.sseStreams.delete(msg.channel); };
-    up.onerror = () => {};
-  } else if (msg.type === "sse-close") {
-    const st = p2p.sseStreams.get(msg.channel);
-    if (st) { try { st.ws.close(); } catch { /* ignore */ } p2p.sseStreams.delete(msg.channel); }
   }
 }
 

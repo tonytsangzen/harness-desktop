@@ -17,12 +17,8 @@ import 'tunnel_backend.dart';
 class WebProxy {
   WebProxy(this.client);
 
-  /// Active backend; may be swapped live (relay tunnel → P2P data channel)
-  /// via [useBackend].
-  TunnelBackend client;
-
-  /// Switch the active backend; in-flight requests keep their old backend.
-  void useBackend(TunnelBackend b) => client = b;
+  /// Active backend (relay tunnel or LAN-direct).
+  final TunnelBackend client;
 
   HttpServer? _server;
   final Map<String, WebSocket> _wsByChannel = {};
