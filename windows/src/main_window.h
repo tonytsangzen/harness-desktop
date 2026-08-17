@@ -1,5 +1,8 @@
 #pragma once
 
+// winsock2 must precede windows.h or winsock.h gets pulled in first and
+// conflicts with winsock2.h (struct redefinition errors).
+#include <winsock2.h>
 #include <windows.h>
 
 #include <string>
