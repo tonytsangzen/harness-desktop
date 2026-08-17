@@ -1,3 +1,21 @@
+## [1.1.0] - 2026-08-17
+
+### 新增
+
+- **手机远程连接（全平台统一）**：Windows 与 Linux 壳同步 macOS 的远程连接能力——配对二维码与设备码/PIN 现在携带局域网直连地址（`lan=`），手机在局域网内直连、外网走 WebRTC P2P、断线回退云中继；配对 PIN 稳定持久化（Windows 注册表 / Linux `~/.config/deepseek-harness/pin`）。
+- **中继服务器免费部署**：新增 `mobile/relay/deploy/`——Dockerfile（多阶段、支持国内镜像源参数）、Caddy 自动 HTTPS 反代、docker-compose 一键栈、部署指南（Oracle Cloud 永久免费 VPS / Cloudflare Tunnel / 国内云试用三路线）。
+- **Flutter CI**：新增 `.github/workflows/flutter.yml`，产出 Android release APK 与 iOS 未签名 `Runner.app`，随 `v*` tag 自动挂到 GitHub Release。
+- **移动端**：新增 iOS 平台工程；WebView 会话恢复、LAN 直连模式统一走本地固定端口代理（会话历史跨启动/跨模式持久）；修复 bridge LAN WebSocket 转发（Node 内置 WebSocket 兼容）与插件加载竞态（自动重载）。
+
+### 修复
+
+- bridge：LAN 事件流（events.mux）经代理转发崩溃（`up.on is not a function`）已修复；手机端"无法获取本地会话"、插件加载失败自动重试。
+- 手机 App：代理端口固定 38080，localStorage origin 稳定。
+
+### 变更
+
+- 桌面壳与移动端版本号统一为 1.1.0。
+
 # Changelog
 
 本项目所有值得注意的变更都会记录在此文件中。

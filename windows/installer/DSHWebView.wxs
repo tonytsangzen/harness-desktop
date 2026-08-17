@@ -74,6 +74,9 @@
     <Feature Id="MainFeature" Title="DeepSeek Harness" Level="1">
       <ComponentRef Id="MainExecutable" />
       <ComponentRef Id="StartMenuShortcut" />
+      <!-- Mobile relay bridge (bridge.mjs + node dependencies), harvested
+           with heat.exe into bridge.wxs. -->
+      <ComponentGroupRef Id="BridgeComponents" />
     </Feature>
   </Product>
 </Wix>

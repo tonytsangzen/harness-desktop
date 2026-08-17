@@ -10,3 +10,7 @@ windows/build/
 
 # macOS
 .DS_Store
+
+# Node
+node_modules/
+*.zip

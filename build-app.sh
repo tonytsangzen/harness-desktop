@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 APP_NAME="DSHWebView"
 DISPLAY_NAME="DeepSeek Harness"
 BUNDLE_ID="com.deepvisus.harness-desktop"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.1.0}"
 
 # Architectures to ship. Build a universal (fat) binary so one .app supports
 # both Apple Silicon (arm64) and Intel (x86_64) Macs.
@@ -53,8 +53,13 @@ mkdir -p "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
 cp "${UNIVERSAL_BIN}" "${APP_DIR}/Contents/MacOS/${APP_NAME}"
 cp AppIcon.icns "${APP_DIR}/Contents/Resources/AppIcon.icns"
 
+# Ship the mobile relay bridge (Node script + its pure-JS dependencies) so
+# the "Mobile Remote" menu can spawn it from the bundle resources.
+cp -R mobile/bridge "${APP_DIR}/Contents/Resources/bridge"
+rm -f "${APP_DIR}/Contents/Resources/bridge/package-lock.json"
+
 # Write Info.plist with the resolved version stamped in.
-sed -e "s|<string>1.0.0</string>|<string>${VERSION}</string>|g" Info.plist \
+sed -e "s|<string>1.1.0</string>|<string>${VERSION}</string>|g" Info.plist \
     > "${APP_DIR}/Contents/Info.plist"
 
 # 3. Codesign ad-hoc so Gatekeeper doesn't complain when launched locally.

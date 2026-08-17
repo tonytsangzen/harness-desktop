@@ -194,6 +194,49 @@ std::wstring NpxPath() {
     return {};
 }
 
+std::wstring NodeVersion() {
+    std::wstring node = NodePath();
+    if (node.empty()) return {};
+    std::wstring cmd = L"\"" + node + L"\" --version";
+    SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
+    HANDLE readPipe = nullptr, writePipe = nullptr;
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) return {};
+    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{ sizeof(si) };
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = writePipe;
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    PROCESS_INFORMATION pi{};
+    bool ok = CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, TRUE,
+                             CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi) != 0;
+    CloseHandle(writePipe);
+    if (!ok) {
+        CloseHandle(readPipe);
+        return {};
+    }
+    CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, 5000);
+    CloseHandle(pi.hProcess);
+    std::string out;
+    char buf[256];
+    DWORD read = 0;
+    while (ReadFile(readPipe, buf, sizeof(buf) - 1, &read, nullptr) && read > 0) {
+        buf[read] = 0;
+        out += buf;
+    }
+    CloseHandle(readPipe);
+    size_t end = out.find_first_of("\r\n");
+    if (end != std::string::npos) out.erase(end);
+    if (out.empty()) return {};
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, out.data(), static_cast<int>(out.size()),
+                                   nullptr, 0);
+    if (wlen <= 0) return {};
+    std::wstring wide(static_cast<size_t>(wlen), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, out.data(), static_cast<int>(out.size()),
+                        &wide[0], wlen);
+    return wide;
+}
+
 std::wstring BinDirectoryFromNodePath() {
     auto node = NodePath();
     return node.empty() ? std::wstring{} : DirName(node);

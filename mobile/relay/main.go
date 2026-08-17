@@ -1,0 +1,606 @@
+// Package main implements the Mobile Relay (protocol spec docs/mobile-relay-protocol.md):
+// WSS host/device tunnels + control plane (register/pair/refresh/revoke) with
+// channel multiplexed forwarding between a host bridge and phone devices.
+package main
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+
+	"github.com/tonytsangzen/harness-desktop/mobile/relay/store"
+)
+
+// Frame is the wire frame shared by both tunnels (spec §3).
+type Frame struct {
+	V       int             `json:"v"`
+	Type    string          `json:"type"`
+	Kind    string          `json:"kind,omitempty"`
+	Channel string          `json:"channel,omitempty"`
+	RpcID   string          `json:"rpcId,omitempty"`
+	ID      string          `json:"id,omitempty"`
+	Status  int             `json:"status,omitempty"`
+	Method  string          `json:"method,omitempty"`
+	Path    string          `json:"path,omitempty"`
+	Body    json.RawMessage `json:"body,omitempty"`
+}
+
+const (
+	PingInterval = 30 * time.Second
+	DeadAfter    = 90 * time.Second
+)
+
+type conn struct {
+	ws   *websocket.Conn
+	send chan []byte
+}
+
+func (c *conn) writeJSON(v any) bool {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return false
+	}
+	select {
+	case c.send <- data:
+		return true
+	default:
+		return false // slow consumer: caller closes the tunnel
+	}
+}
+
+// hub routes frames between host and device tunnels.
+type hub struct {
+	store *store.Store
+
+	mu          sync.RWMutex
+	hostConns   map[string]*conn   // hostID -> conn
+	deviceConns map[string]*conn   // deviceID -> conn
+	channels    map[string]string  // channel -> deviceID (for host->device routing)
+}
+
+func newHub(st *store.Store) *hub {
+	return &hub{
+		store:       st,
+		hostConns:   map[string]*conn{},
+		deviceConns: map[string]*conn{},
+		channels:    map[string]string{},
+	}
+}
+
+func (h *hub) attachHost(id string, c *conn) (kicked bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if old, ok := h.hostConns[id]; ok {
+		log.Printf("hub: host %q replaced by new connection (kicking old)", id)
+		close(old.send) // kick the stale connection (409 host-replaced)
+		kicked = true
+	}
+	h.hostConns[id] = c
+	return
+}
+
+func (h *hub) detachHost(id string, c *conn) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.hostConns[id] == c {
+		delete(h.hostConns, id)
+		h.store.SetHostOnline(id, false)
+		log.Printf("hub: host %q detached (connection closed)", id)
+	} else {
+		log.Printf("hub: host %q detach skipped (not current conn)", id)
+	}
+}
+
+func (h *hub) attachDevice(id string, c *conn) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if old, ok := h.deviceConns[id]; ok {
+		close(old.send)
+	}
+	h.deviceConns[id] = c
+}
+
+// hostConn returns the live connection for a host, or nil.
+func (h *hub) hostConn(id string) *conn {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.hostConns[id]
+}
+
+// deviceConn returns the live connection for a device, or nil.
+func (h *hub) deviceConn(id string) *conn {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.deviceConns[id]
+}
+
+func (h *hub) detachDevice(id string, c *conn) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.deviceConns[id] == c {
+		delete(h.deviceConns, id)
+	}
+	// Channels owned by the departed device can never be answered; drop them
+	// so a reused channel name rebinds to the current owner.
+	for ch, dev := range h.channels {
+		if dev == id {
+			delete(h.channels, ch)
+		}
+	}
+}
+
+// toHost delivers a frame from a device to its host tunnel; returns error code.
+func (h *hub) toHost(hostID string, f Frame) string {
+	h.mu.RLock()
+	c, ok := h.hostConns[hostID]
+	h.mu.RUnlock()
+	if !ok {
+		return "host-offline"
+	}
+	if !c.writeJSON(f) {
+		return "overflow"
+	}
+	return ""
+}
+
+// toDevice delivers a frame from a host to a device (via channel routing).
+func (h *hub) toDevice(deviceID string, f Frame) string {
+	h.mu.RLock()
+	c, ok := h.deviceConns[deviceID]
+	h.mu.RUnlock()
+	if !ok {
+		return "device-offline"
+	}
+	if !c.writeJSON(f) {
+		return "overflow"
+	}
+	return ""
+}
+
+func (h *hub) channelDevice(ch string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	// Host replies carry the channel but no deviceID: the device that opened
+	// the channel is the sole owner (one mux channel per device in v1).
+	return h.channels[ch]
+}
+
+func (h *hub) bindChannel(ch, deviceID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Latest opener wins: a reused channel name belongs to the current device.
+	h.channels[ch] = deviceID
+}
+
+var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+type server struct {
+	store *store.Store
+	hub   *hub
+}
+
+func main() {
+	st := store.New()
+	h := newHub(st)
+	srv := &server{store: st, hub: h}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("/relay/v1/pair", srv.handlePair)
+	mux.HandleFunc("/relay/v1/pair/refresh", srv.handleRefresh)
+	mux.HandleFunc("/relay/v1/revoke", srv.handleRevoke)
+	mux.HandleFunc("/relay/v1/host/devices", srv.handleHostDevices)
+	mux.HandleFunc("/relay/v1/host", srv.handleHost)
+	mux.HandleFunc("/relay/v1/device", srv.handleDevice)
+
+	addr := ":8080"
+	log.Printf("relay listening on %s (WSS only behind TLS reverse proxy)", addr)
+	if err := http.ListenAndServe(addr, mux); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// ---- control plane (HTTP) ----
+
+type apiError struct {
+	Code string `json:"code"`
+	Msg  string `json:"message"`
+}
+
+func writeError(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{"error": apiError{Code: code, Msg: msg}})
+}
+
+func bearer(r *http.Request) string {
+	const p = "Bearer "
+	h := r.Header.Get("Authorization")
+	if len(h) > len(p) && h[:len(p)] == p {
+		return h[len(p):]
+	}
+	return ""
+}
+
+// POST /relay/v1/pair  {deviceId, pin}
+// deviceId is the 13-digit device ID the shell generated and put in the QR
+// code (registered on the relay as the host ID).
+func (s *server) handlePair(w http.ResponseWriter, r *http.Request) {
+	// CORS for web-based clients (file:// probe pages, future web UI).
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method", "POST required")
+		return
+	}
+	var req struct {
+		DeviceID string `json:"deviceId"`
+		Pin      string `json:"pin"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error())
+		return
+	}
+	dev, sessionToken, refreshToken, ok, code := s.store.PairDevice(req.DeviceID, req.Pin)
+	if !ok {
+		log.Printf("pair: deviceId=%q pin=%q FAILED code=%q", req.DeviceID, req.Pin, code)
+		status := http.StatusConflict
+		if code == "pair-invalid" {
+			status = http.StatusConflict
+		}
+		writeError(w, status, code, code)
+		return
+	}
+	log.Printf("pair: deviceId=%q OK -> device=%q", req.DeviceID, dev.ID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"hostId": dev.HostID, "deviceId": dev.ID,
+		"sessionToken": sessionToken, "refreshToken": refreshToken,
+	})
+}
+
+// POST /relay/v1/pair/refresh  {refreshToken}
+func (s *server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method", "POST required")
+		return
+	}
+	var req struct {
+		RefreshToken string `json:"refreshToken"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "bad-request", err.Error())
+		return
+	}
+	sessionToken, newRefresh, ok := s.store.RefreshSession(req.RefreshToken)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid refresh token")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"sessionToken": sessionToken, "refreshToken": newRefresh})
+}
+
+// GET /relay/v1/host/devices  (Bearer hostToken)
+// Lets the shell (host side) ask the relay which devices are paired to this
+// host and whether each has a live tunnel — instead of guessing whether the
+// mobile app is connected.
+func (s *server) handleHostDevices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method", "GET required")
+		return
+	}
+	host := s.store.HostByToken(bearer(r))
+	if host == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid or expired host token")
+		return
+	}
+	devs := s.store.DevicesByHost(host.ID)
+	out := make([]map[string]any, 0, len(devs))
+	for _, d := range devs {
+		out = append(out, map[string]any{
+			"deviceId": d.ID,
+			"online":   s.hub.deviceConn(d.ID) != nil,
+			"pairedAt": d.CreatedAt,
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"hostId": host.ID, "devices": out})
+}
+
+// POST /relay/v1/revoke  (Bearer sessionToken)  {deviceId?}
+func (s *server) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method", "POST required")
+		return
+	}
+	tok := bearer(r)
+	if tok == "" {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "missing token")
+		return
+	}
+	if sess, ok := s.store.SessionByToken(tok); ok {
+		s.store.RevokeSession(tok)
+		// Drop the live tunnel.
+		s.hub.mu.Lock()
+		if c, ok := s.hub.deviceConns[sess.DeviceID]; ok {
+			close(c.send)
+		}
+		s.hub.mu.Unlock()
+	} else {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid token")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"revoked": true})
+}
+
+// ---- tunnels (WSS) ----
+
+// handleHost: first frame must be register (or Bearer hostToken on reconnect).
+func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	c := &conn{ws: ws, send: make(chan []byte, 1024)}
+	go pump(c)
+	defer ws.Close()
+
+	var hostToken, pin string
+	var pinExpires int64
+
+	// Reconnect via hostToken?
+	host := s.store.HostByToken(bearer(r))
+	register := false
+	if host == nil {
+		if bearer(r) != "" {
+			// Relay lost the host (restart / data reset): tell the bridge to
+			// re-register, keeping this connection open for its register frame.
+			log.Printf("host: token %q unknown -> ask re-register", truncate(bearer(r), 10))
+			c.writeJSON(map[string]any{"v": 1, "type": "control", "kind": "unknown-host"})
+		}
+		// Wait for the register control frame (5s budget).
+		ws.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, raw, err := ws.ReadMessage()
+		if err != nil {
+			log.Printf("host: no register frame within budget: %v", err)
+			ws.Close()
+			return
+		}
+		var f Frame
+		if json.Unmarshal(raw, &f) != nil || f.Type != "control" {
+			ws.Close()
+			return
+		}
+		var reg struct {
+			HostID     string `json:"hostId"`
+			HostName   string `json:"hostName"`
+			DshVersion string `json:"dshVersion"`
+			Pin        string `json:"pin"`
+		}
+		if err := json.Unmarshal(f.Body, &reg); err != nil {
+			log.Printf("host register: bad body %q: %v", f.Body, err)
+			ws.Close()
+			return
+		}
+		if f.Kind != "register" {
+			log.Printf("host register: unexpected kind %q", f.Kind)
+			ws.Close()
+			return
+		}
+		host, hostToken, pin, pinExpires = s.store.RegisterHost(reg.HostID, reg.HostName, reg.DshVersion, reg.Pin)
+		register = true
+		ws.SetReadDeadline(time.Time{})
+		log.Printf("host register: hostId=%q name=%q dsh=%q (reused=%v)", reg.HostID, reg.HostName, reg.DshVersion, !register)
+	} else {
+		// Token-authenticated reconnect: refuse when this host already has a
+		// live connection (a duplicate bridge process would otherwise kick and
+		// re-register each other in an endless loop).
+		if s.hub.hostConn(host.ID) != nil {
+			log.Printf("host: hostId=%q already online, refusing duplicate", host.ID)
+			ws.Close()
+			return
+		}
+		log.Printf("host reconnect via token: hostId=%q", host.ID)
+	}
+
+	kicked := s.hub.attachHost(host.ID, c)
+	s.store.SetHostOnline(host.ID, true)
+	defer s.hub.detachHost(host.ID, c)
+
+	if kicked {
+		log.Printf("host: hostId=%q replaced by new connection", host.ID)
+		ws.Close()
+		return
+	}
+	if register {
+		c.writeJSON(map[string]any{
+			"v": 1, "type": "control", "kind": "registered",
+			"body": map[string]any{
+				"hostId": host.ID, "hostToken": hostToken,
+				"pin": pin, "pinExpiresAt": pinExpires,
+			},
+		})
+		log.Printf("host: registered sent hostId=%q pin=%q", host.ID, pin)
+	}
+
+	readerLoop(c, func(f Frame) {
+		switch f.Type {
+		case "ping":
+			c.writeJSON(map[string]any{"v": 1, "type": "pong"})
+		case "rpc-reply", "sse-frame", "sse-close", "http-reply", "signal":
+			// Host -> device: route by channel.
+			dev := s.hub.channelDevice(f.Channel)
+			if dev != "" {
+				if code := s.hub.toDevice(dev, f); code != "" {
+					log.Printf("host->device: route failed ch=%q dev=%q code=%q", f.Channel, dev, code)
+				} else {
+					// Summarize rpc-reply bodies so the session list contents
+					// are visible without dumping the whole payload.
+					summary := ""
+					if f.Type == "rpc-reply" {
+						var body struct {
+							OK    bool `json:"ok"`
+							Value struct {
+								Items []json.RawMessage `json:"items"`
+							} `json:"value"`
+							Error *struct {
+								Code string `json:"code"`
+							} `json:"error"`
+						}
+						if json.Unmarshal(f.Body, &body) == nil {
+							if body.OK {
+								summary = fmt.Sprintf(" ok=true items=%d", len(body.Value.Items))
+							} else if body.Error != nil {
+								summary = fmt.Sprintf(" ok=false code=%q", body.Error.Code)
+							}
+						}
+					}
+					log.Printf("host->device: forwarded type=%q ch=%q rpcId=%q%s", f.Type, f.Channel, f.RpcID, summary)
+				}
+			} else {
+				log.Printf("host->device: no device bound to channel %q", f.Channel)
+			}
+		default:
+			// ignore unknown host frames
+		}
+	})
+}
+
+// handleDevice: requires a valid sessionToken; routes device frames to host.
+func (s *server) handleDevice(w http.ResponseWriter, r *http.Request) {
+	tok := bearer(r)
+	sess, ok := s.store.SessionByToken(tok)
+	if !ok {
+		log.Printf("device: rejected token %q", truncate(tok, 10))
+		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid or expired session token")
+		return
+	}
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	c := &conn{ws: ws, send: make(chan []byte, 1024)}
+	go pump(c)
+	defer ws.Close()
+	s.hub.attachDevice(sess.DeviceID, c)
+	defer s.hub.detachDevice(sess.DeviceID, c)
+	log.Printf("device: connected deviceId=%q hostId=%q", sess.DeviceID, sess.HostID)
+
+	readerLoop(c, func(f Frame) {
+		switch f.Type {
+		case "ping":
+			c.writeJSON(map[string]any{"v": 1, "type": "pong"})
+		case "rpc", "sse-open", "respond", "http", "signal":
+			if f.Channel != "" && f.Type != "sse-close" {
+				s.hub.bindChannel(f.Channel, sess.DeviceID)
+			}
+			if code := s.hub.toHost(sess.HostID, f); code != "" {
+				// Transport-level error reply to the device, shaped by frame type
+				// so the bridge resolves its pending request immediately instead
+				// of hanging until its own timeout.
+				log.Printf("device->host: route failed type=%q ch=%q rpcId=%q hostId=%q code=%q",
+					f.Type, f.Channel, f.RpcID, sess.HostID, code)
+				if f.Type == "http" {
+					c.writeJSON(map[string]any{
+						"v": 1, "type": "http-reply", "id": f.ID, "channel": f.Channel,
+						"status": 502,
+						"body": map[string]any{
+							"headers": map[string]string{"content-type": "text/plain; charset=utf-8"},
+							"body":    base64.StdEncoding.EncodeToString([]byte("desktop host offline: " + code)),
+						},
+					})
+				} else {
+					c.writeJSON(map[string]any{
+						"v": 1, "type": "rpc-reply", "channel": f.Channel, "rpcId": f.RpcID,
+						"body": map[string]any{"transport": true, "error": map[string]string{"code": code}},
+					})
+				}
+			} else {
+				log.Printf("device->host: forwarded type=%q path=%q ch=%q rpcId=%q",
+					f.Type, f.Path, f.Channel, f.RpcID)
+			}
+		default:
+			// ignore
+		}
+	})
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+func pump(c *conn) {
+	ticker := time.NewTicker(PingInterval)
+	defer func() {
+		ticker.Stop()
+		c.ws.Close()
+	}()
+	for {
+		select {
+		case data, ok := <-c.send:
+			if !ok {
+				c.ws.WriteMessage(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseNormalClosure, "replaced"))
+				return
+			}
+			if err := c.ws.WriteMessage(websocket.TextMessage, data); err != nil {
+				return
+			}
+		case <-ticker.C:
+			if err := c.ws.WriteMessage(websocket.TextMessage,
+				[]byte(`{"v":1,"type":"ping"}`)); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// readerLoop reads frames until the socket dies; pings are answered inline.
+func readerLoop(c *conn, handle func(Frame)) {
+	c.ws.SetReadDeadline(time.Now().Add(DeadAfter))
+	c.ws.SetPongHandler(func(string) error {
+		c.ws.SetReadDeadline(time.Now().Add(DeadAfter))
+		return nil
+	})
+	for {
+		_, raw, err := c.ws.ReadMessage()
+		if err != nil {
+			var closeErr *websocket.CloseError
+			if errors.As(err, &closeErr) && closeErr.Code == websocket.CloseNormalClosure {
+				log.Printf("ws: read loop exit: normal close")
+				return
+			}
+			log.Printf("ws: read loop exit: %v", err)
+			return
+		}
+		var f Frame
+		if json.Unmarshal(raw, &f) != nil {
+			continue // corrupt frame: skip, keep stream alive
+		}
+		if f.Type == "pong" {
+			// The bridge answers ping with a TEXT pong frame ({"v":1,"type":"pong"}),
+			// not a WebSocket protocol pong — refresh the read deadline either way
+			// so a healthy tunnel never times out.
+			c.ws.SetReadDeadline(time.Now().Add(DeadAfter))
+			continue
+		}
+		handle(f)
+	}
+}

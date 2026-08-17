@@ -1,6 +1,10 @@
 #define _USE_MATH_DEFINES
 #include "main_window.h"
 
+#ifndef APP_VERSION
+#define APP_VERSION "1.0.9"
+#endif
+
 #include "dsh_update_manager.h"
 #include "http.h"
 #include "json.h"
@@ -10,9 +14,13 @@
 #include "settings.h"
 #include "util.h"
 
+#include "../../third_party/qrcodegen/qrcodegen.h"
+
 #include <wrl/client.h>
 #include <wrl/event.h>
 #include <webview2.h>
+#include <gdiplus.h>
+#include <wincrypt.h>
 
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -21,8 +29,10 @@
 #include <winnls.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dsh {
@@ -46,8 +56,10 @@ const UINT kWM_ServerFailed = WM_APP + 7;
 const UINT kWM_UpdateAvailable = WM_APP + 8;
 const UINT kWM_UpdateFinished = WM_APP + 9;
 const UINT kWM_DownloadFailed = WM_APP + 10;
+const UINT kWM_BridgeLine = WM_APP + 11;
 
 const UINT_PTR kSpinnerTimer = 1;
+const UINT_PTR kRegisterTimerId = 2;
 const int kDownloadBarHeight = 48;
 const UINT_PTR kIDM_PluginsMarket = 40001;
 const UINT_PTR kIDM_ThemeSystem = 40002;
@@ -57,6 +69,9 @@ const UINT_PTR kIDM_LangZh = 40005;
 const UINT_PTR kIDM_LangEn = 40006;
 const UINT_PTR kIDM_LangSystem = 40007;
 const UINT_PTR kIDM_FullScreen = 40008;
+const UINT_PTR kIDM_MobileRemote = 40009;
+const UINT_PTR kIDM_Settings = 40010;
+const UINT_PTR kIDM_About = 40011;
 
 const COLORREF kOverlayBg = RGB(0xFF, 0xFF, 0xFF);
 const COLORREF kOverlayText = RGB(0x20, 0x20, 0x20);
@@ -451,11 +466,15 @@ void MainWindow::LoadSettings() {
     if (lang == L"zh") lang_ = Lang::Zh;
     else if (lang == L"en") lang_ = Lang::En;
     else lang_ = Lang::System;
+
+    std::wstring relay = ReadRegStr(L"Relay");
+    if (!relay.empty()) mobileRelayUrl_ = relay;
 }
 
 void MainWindow::SaveSettings() {
     WriteRegStr(L"Theme", theme_ == Theme::Light ? L"light" : theme_ == Theme::Dark ? L"dark" : L"system");
     WriteRegStr(L"Language", lang_ == Lang::Zh ? L"zh" : lang_ == Lang::En ? L"en" : L"system");
+    WriteRegStr(L"Relay", mobileRelayUrl_);
 }
 
 // Recreate the menu bar with the current language and checked radio states.
@@ -489,6 +508,15 @@ void MainWindow::RebuildMenu() {
 
     // Plugins Market.
     AppendMenuW(menu, MF_STRING, kIDM_PluginsMarket, zh ? L"插件市场" : L"Plugins Market");
+
+    // Remote connect.
+    AppendMenuW(menu, MF_STRING, kIDM_MobileRemote, zh ? L"远程连接…" : L"Remote Connect…");
+
+    // Settings.
+    AppendMenuW(menu, MF_STRING, kIDM_Settings, zh ? L"设置…" : L"Settings…");
+
+    // About.
+    AppendMenuW(menu, MF_STRING, kIDM_About, zh ? L"关于…" : L"About…");
 
     // Full screen toggle (checkable).
     AppendMenuW(menu, MF_STRING | (fullScreen_ ? MF_CHECKED : 0),
@@ -611,10 +639,20 @@ void MainWindow::OnDestroy() {
     PostQuitMessage(0);
 }
 
-void MainWindow::OnTimer() {
+void MainWindow::OnTimer(WPARAM wParam) {
     spinnerFrame_++;
     if (overlayHwnd_ && IsWindowVisible(overlayHwnd_)) {
         InvalidateRect(overlayHwnd_, nullptr, FALSE);
+    }
+    if (wParam == kRegisterTimerId && !registered_) {
+        // Relay unreachable: stop the bridge and tell the user.
+        KillTimer(hwnd_, kRegisterTimerId);
+        registerTimerId_ = 0;
+        StopBridge();
+        bool zh = IsChinese();
+        MessageBoxW(hwnd_, zh ? L"中继服务器不可用。请检查「设置…」中的中继地址后重试。"
+                              : L"Relay server unreachable. Check the relay address in Settings… and try again.",
+                    zh ? L"远程连接" : L"Remote Connect", MB_OK | MB_ICONERROR);
     }
 }
 
@@ -1138,7 +1176,7 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: OnCreate(); return 0;
         case WM_SIZE: OnSize(); return 0;
-        case WM_TIMER: OnTimer(); return 0;
+        case WM_TIMER: OnTimer(wParam); return 0;
         case WM_DESTROY: OnDestroy(); return 0;
         case kWM_OverlayStatus: OnOverlayStatus(reinterpret_cast<std::wstring*>(lParam)); return 0;
         case kWM_OverlayProgress: OnOverlayProgress(wParam); return 0;
@@ -1150,11 +1188,15 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         case kWM_UpdateAvailable: OnUpdateAvailable(reinterpret_cast<std::wstring*>(lParam)); return 0;
         case kWM_UpdateFinished: OnUpdateFinished(wParam != 0); return 0;
         case kWM_DownloadFailed: OnDownloadFailed(reinterpret_cast<std::wstring*>(lParam)); return 0;
+        case kWM_BridgeLine: OnBridgeLine(reinterpret_cast<std::wstring*>(lParam)); return 0;
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
                 case kIDM_PluginsMarket:
                     OpenInDefaultBrowser(L"https://tonytsangzen.github.io/harness-market/");
                     return 0;
+                case kIDM_MobileRemote: OnMobileRemote(); return 0;
+                case kIDM_Settings: OnSettings(); return 0;
+                case kIDM_About: OnAbout(); return 0;
                 case kIDM_ThemeSystem: SetTheme(Theme::System); return 0;
                 case kIDM_ThemeLight: SetTheme(Theme::Light); return 0;
                 case kIDM_ThemeDark: SetTheme(Theme::Dark); return 0;
@@ -1172,6 +1214,596 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
     }
     return DefWindowProcW(hwnd_, msg, wParam, lParam);
+}
+
+// MARK: - Mobile remote (relay bridge)
+
+namespace {
+
+// Context passed to the pairing dialog (PIN + shell device ID + QR PNG).
+struct PairingCtx {
+    std::wstring pin;
+    std::wstring deviceId;
+    std::string qrPNG;
+};
+
+// ---- In-memory dialog template builder (tiny dialogs without .rc) ----
+
+struct TemplateItem {
+    int id;
+    const wchar_t* cls;
+    const wchar_t* text;
+    DWORD style;
+    short x, y, cx, cy;
+};
+
+void PadDword(std::vector<BYTE>& v) {
+    while (v.size() % 4) v.push_back(0);
+}
+
+void AddWord(std::vector<BYTE>& v, WORD w) {
+    v.push_back(static_cast<BYTE>(w & 0xFF));
+    v.push_back(static_cast<BYTE>((w >> 8) & 0xFF));
+}
+
+void AddDword(std::vector<BYTE>& v, DWORD d) {
+    PadDword(v);
+    for (int i = 0; i < 4; ++i) v.push_back(static_cast<BYTE>((d >> (8 * i)) & 0xFF));
+}
+
+void AddString(std::vector<BYTE>& v, const wchar_t* s) {
+    if (!s) s = L"";
+    PadDword(v);
+    while (*s) AddWord(v, static_cast<WORD>(*s++));
+    AddWord(v, 0);
+}
+
+HGLOBAL BuildDialogTemplate(const wchar_t* caption, short cx, short cy,
+                            const std::vector<TemplateItem>& items) {
+    std::vector<BYTE> v;
+    AddDword(v, 0x00010000); // dlgVer + signature
+    AddDword(v, 0);          // helpID + exStyle
+    AddDword(v, DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU);
+    AddWord(v, static_cast<WORD>(items.size()));
+    AddWord(v, 0); AddWord(v, 0); // x, y (centered by dialog manager)
+    AddWord(v, cx); AddWord(v, cy);
+    AddString(v, caption);
+    AddString(v, L"MS Shell Dlg");
+    AddWord(v, 9); // font size
+    for (const auto& it : items) {
+        AddDword(v, it.style);
+        AddDword(v, 0); // exStyle
+        AddWord(v, static_cast<WORD>(it.x));
+        AddWord(v, static_cast<WORD>(it.y));
+        AddWord(v, static_cast<WORD>(it.cx));
+        AddWord(v, static_cast<WORD>(it.cy));
+        AddWord(v, static_cast<WORD>(it.id));
+        AddString(v, it.cls);
+        AddString(v, it.text);
+        AddWord(v, 0); // creation data
+    }
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, v.size());
+    if (!hg) return nullptr;
+    void* p = GlobalLock(hg);
+    if (p) {
+        memcpy(p, v.data(), v.size());
+        GlobalUnlock(hg);
+    }
+    return hg;
+}
+
+// ---- GDI+ (used to render the QR PNG) ----
+
+ULONG_PTR g_gdiplusToken = 0;
+
+bool EnsureGdiPlus() {
+    static bool ok = [] {
+        Gdiplus::GdiplusStartupInput input;
+        return Gdiplus::GdiplusStartup(&g_gdiplusToken, &input, nullptr) == Gdiplus::Ok;
+    }();
+    return ok;
+}
+
+HBITMAP HBitmapFromPng(const BYTE* png, size_t len) {
+    if (!EnsureGdiPlus()) return nullptr;
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, len);
+    if (!hg) return nullptr;
+    void* p = GlobalLock(hg);
+    if (!p) { GlobalFree(hg); return nullptr; }
+    memcpy(p, png, len);
+    GlobalUnlock(hg);
+    IStream* stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(hg, TRUE, &stream))) { GlobalFree(hg); return nullptr; }
+    Gdiplus::Bitmap bmp(stream);
+    stream->Release();
+    HBITMAP hbmp = nullptr;
+    bmp.GetHBITMAP(Gdiplus::Color(255, 255, 255), &hbmp);
+    return hbmp;
+}
+
+// ---- Device ID + pairing QR (shell-generated) ----
+
+int GetEncoderClsid(const wchar_t* mimeType, CLSID* clsid) {
+    UINT num = 0, size = 0;
+    Gdiplus::GetImageEncodersSize(&num, &size);
+    if (size == 0) return -1;
+    std::vector<BYTE> buf(size);
+    Gdiplus::ImageCodecInfo* enc = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buf.data());
+    Gdiplus::GetImageEncoders(num, size, enc);
+    for (UINT i = 0; i < num; i++) {
+        if (wcscmp(enc[i].MimeType, mimeType) == 0) {
+            *clsid = enc[i].Clsid;
+            return i;
+        }
+    }
+    return -1;
+}
+
+std::string SaveBitmapPng(Gdiplus::Bitmap* bmp) {
+    CLSID clsid;
+    if (GetEncoderClsid(L"image/png", &clsid) < 0) return "";
+    IStream* stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream))) return "";
+    Gdiplus::Status st = bmp->Save(stream, &clsid, nullptr);
+    if (st != Gdiplus::Ok) { stream->Release(); return ""; }
+    HGLOBAL hg = nullptr;
+    GetHGlobalFromStream(stream, &hg);
+    SIZE_T len = GlobalSize(hg);
+    const BYTE* p = static_cast<const BYTE*>(GlobalLock(hg));
+    std::string out(reinterpret_cast<const char*>(p), len);
+    GlobalUnlock(hg);
+    stream->Release();
+    return out;
+}
+
+// First non-loopback IPv4 address in a private range (LAN direct connect),
+// mirroring the macOS shell so the phone can prefer a direct LAN connection.
+std::string LocalLANAddress() {
+    std::string result;
+    ULONG size = 0;
+    GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                       GAA_FLAG_SKIP_DNS_SERVER,
+                         nullptr, nullptr, &size);
+    if (size == 0) return "";
+    std::vector<BYTE> buf(size);
+    PIP_ADAPTER_ADDRESSES addrs = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buf.data());
+    if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST |
+                                          GAA_FLAG_SKIP_DNS_SERVER,
+                             nullptr, addrs, &size) != NO_ERROR) {
+        return "";
+    }
+    for (PIP_ADAPTER_ADDRESSES a = addrs; a; a = a->Next) {
+        if (a->OperStatus != IfOperStatusUp) continue;
+        for (PIP_ADAPTER_UNICAST_ADDRESS u = a->FirstUnicastAddress; u; u = u->Next) {
+            if (u->Address.lpSockaddr->sa_family != AF_INET) continue;
+            auto* sin = reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr);
+            char ip[INET_ADDRSTRLEN] = {};
+            inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
+            std::string s = ip;
+            if (s.rfind("192.168.", 0) == 0) return s; // prefer 192.168.*
+            if (s.rfind("10.", 0) == 0 || s.rfind("172.", 0) == 0) {
+                if (result.empty()) result = s;
+            }
+        }
+    }
+    return result;
+}
+
+// Stable pairing PIN: generated once, then kept in the registry so reconnects
+// reuse the same host identity (mirrors the macOS shell's UserDefaults PIN).
+std::wstring StablePairingPin() {
+    HKEY key = nullptr;
+    wchar_t pin[16] = {};
+    DWORD psize = sizeof(pin);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\DSHWebView", 0, KEY_READ, &key) ==
+            ERROR_SUCCESS) {
+        if (RegQueryValueExW(key, L"PairingPin", nullptr, nullptr,
+                             reinterpret_cast<LPBYTE>(pin), &psize) == ERROR_SUCCESS &&
+            wcslen(pin) == 6) {
+            RegCloseKey(key);
+            return pin;
+        }
+        RegCloseKey(key);
+    }
+    // Generate a fresh 6-digit PIN.
+    HCRYPTPROV prov = 0;
+    std::wstring npin;
+    if (CryptAcquireContextW(&prov, nullptr, nullptr, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT)) {
+        BYTE rnd[6] = {};
+        if (CryptGenRandom(prov, sizeof(rnd), rnd)) {
+            for (BYTE b : rnd) npin += static_cast<wchar_t>(L'0' + (b % 10));
+        }
+        CryptReleaseContext(prov, 0);
+    }
+    if (npin.size() != 6) {
+        npin = L"123456"; // last-resort fallback
+    }
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\DSHWebView", 0, nullptr, 0,
+                        KEY_WRITE, nullptr, &key, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(key, L"PairingPin", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(npin.c_str()),
+                       static_cast<DWORD>((npin.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(key);
+    }
+    return npin;
+}
+
+// 13-digit random device ID derived from device info (hostname + MachineGuid),
+// stable across launches so reconnects reuse the same host identity.
+std::string DeviceID() {
+    wchar_t host[256] = {};    DWORD hlen = 256;
+    GetComputerNameW(host, &hlen);
+    std::string seed = WideToUtf8(host);
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography",
+                      0, KEY_READ, &key) == ERROR_SUCCESS) {
+        wchar_t guid[128] = {};
+        DWORD gsz = sizeof(guid);
+        if (RegQueryValueExW(key, L"MachineGuid", nullptr, nullptr,
+                             reinterpret_cast<LPBYTE>(guid), &gsz) == ERROR_SUCCESS) {
+            seed += "|" + WideToUtf8(guid);
+        }
+        RegCloseKey(key);
+    }
+    BYTE digest[32] = {};
+    HCRYPTPROV prov = 0;
+    HCRYPTHASH hash = 0;
+    if (CryptAcquireContextW(&prov, nullptr, nullptr, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT) &&
+        CryptCreateHash(prov, CALG_SHA_256, 0, 0, &hash)) {
+        CryptHashData(hash, reinterpret_cast<const BYTE*>(seed.data()),
+                      static_cast<DWORD>(seed.size()), 0);
+        DWORD dlen = 32;
+        CryptGetHashParam(hash, HP_HASHVAL, digest, &dlen, 0);
+        CryptDestroyHash(hash);
+        CryptReleaseContext(prov, 0);
+    }
+    unsigned long long value = 0;
+    for (int i = 0; i < 8; i++) value = (value << 8) | digest[i];
+    wchar_t buf[16] = {};
+    swprintf(buf, 16, L"%013llu", value % 10000000000000ULL);
+    return WideToUtf8(buf);
+}
+
+// The pairing QR content: relay host + device ID, plus the relay's own scheme
+// (http for plaintext test relays, https otherwise) so the phone connects
+// with a matching protocol. `lanAddress` (e.g. "192.168.1.5:13080") lets the
+// phone prefer a direct LAN connection to this desktop's dsh web and only
+// fall back to the cloud relay when it can't reach it.
+std::string PairingQRContent(const std::wstring& relayUrl, const std::string& deviceId,
+                             const std::string& lanAddress) {
+    std::wstring scheme = L"https";
+    std::wstring host = relayUrl;
+    size_t sep = host.find(L"://");
+    if (sep != std::wstring::npos) {
+        scheme = host.substr(0, sep);
+        host = host.substr(sep + 3);
+    }
+    size_t slash = host.find(L'/');
+    if (slash != std::wstring::npos) host = host.substr(0, slash);
+    std::string qr = "relay://" + WideToUtf8(host) + "/pair?device=" + deviceId +
+                     "&scheme=" + WideToUtf8(scheme);
+    if (!lanAddress.empty()) qr += "&lan=" + lanAddress;
+    return qr;
+}
+
+// Renders a QR code as PNG data using the vendored qrcodegen library.
+std::string GenerateQRPNG(const std::string& content) {
+    if (!EnsureGdiPlus()) return "";
+    uint8_t qrcode[qrcodegen_BUFFER_LEN_MAX];
+    uint8_t temp[qrcodegen_BUFFER_LEN_MAX];
+    if (!qrcodegen_encodeText(content.c_str(), temp, qrcode, qrcodegen_Ecc_MEDIUM,
+                              qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX,
+                              qrcodegen_Mask_AUTO, true)) {
+        return "";
+    }
+    int size = qrcodegen_getSize(qrcode);
+    const int scale = 10;
+    int dim = size * scale;
+    Gdiplus::Bitmap bmp(dim, dim, PixelFormat24bppRGB);
+    Gdiplus::BitmapData bd;
+    Gdiplus::Rect rc(0, 0, dim, dim);
+    bmp.LockBits(&rc, Gdiplus::ImageLockModeWrite, PixelFormat24bppRGB, &bd);
+    BYTE* px = static_cast<BYTE*>(bd.Scan0);
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            BYTE v = qrcodegen_getModule(qrcode, x, y) ? 0 : 255;
+            for (int dy = 0; dy < scale; dy++) {
+                for (int dx = 0; dx < scale; dx++) {
+                    BYTE* p = px + (y * scale + dy) * bd.Stride + (x * scale + dx) * 3;
+                    p[0] = v; p[1] = v; p[2] = v;
+                }
+            }
+        }
+    }
+    bmp.UnlockBits(&bd);
+    return SaveBitmapPng(&bmp);
+}
+
+// True for localhost / 127.x / ::1 — where a plain-HTTP relay is expected
+// during testing (scheme auto-completion uses this).
+bool IsLoopbackHost(const std::wstring& hostOrAddr) {
+    std::wstring h = hostOrAddr;
+    for (auto& c : h) c = towlower(c);
+    return h == L"localhost" || h == L"::1" || h.rfind(L"127.", 0) == 0;
+}
+
+} // namespace
+
+// MARK: - Settings (mobile relay address)
+
+INT_PTR CALLBACK MainWindow::SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_INITDIALOG) {
+        auto* relay = reinterpret_cast<std::wstring*>(lParam);
+        SetWindowLongPtrW(hDlg, DWLP_USER, lParam);
+        bool zh = MainWindow::Instance().IsChinese();
+        SetDlgItemTextW(hDlg, 101, zh ? L"中继地址（URL 或 IP:端口）" : L"Relay address (URL or IP:port)");
+        SetDlgItemTextW(hDlg, 104, zh ? L"远程 App 通过该云端中继连接本机。保存后「远程连接」使用此地址。"
+                                      : L"The remote app connects to this machine through this cloud relay. Used by Remote Connect.");
+        SetDlgItemTextW(hDlg, 103, relay->c_str());
+        return TRUE;
+    }
+    if (msg == WM_COMMAND) {
+        switch (LOWORD(wParam)) {
+            case IDOK: {
+                auto* relay = reinterpret_cast<std::wstring*>(GetWindowLongPtrW(hDlg, DWLP_USER));
+                wchar_t buf[512] = {};
+                GetDlgItemTextW(hDlg, 103, buf, 512);
+                std::wstring raw = buf;
+                size_t b = raw.find_first_not_of(L" \t\r\n");
+                size_t e = raw.find_last_not_of(L" \t\r\n");
+                raw = (b == std::wstring::npos) ? L"" : raw.substr(b, e - b + 1);
+                if (!raw.empty() && raw.rfind(L"http://", 0) != 0 && raw.rfind(L"https://", 0) != 0) {
+                    // Loopback addresses usually run a plain-HTTP test relay.
+                    raw = IsLoopbackHost(raw) ? L"http://" + raw : L"https://" + raw;
+                }
+                *relay = raw;
+                EndDialog(hDlg, IDOK);
+                return TRUE;
+            }
+            case IDCANCEL: EndDialog(hDlg, IDCANCEL); return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+void MainWindow::OnAbout() {
+    bool zh = IsChinese();
+
+    std::string engine = LocalVersion();
+    if (engine.empty()) engine = zh ? "未安装" : "not installed";
+    std::wstring node = NodeRuntimeManager::NodeVersion();
+    if (node.empty()) node = zh ? L"未安装" : L"not installed";
+
+    std::wstring text = L"DeepSeek Harness\n\n";
+    text += (zh ? L"版本: " : L"Version: ") + Utf8ToWide(APP_VERSION) + L"\n";
+    text += (zh ? L"引擎（dsh web）: " : L"Engine (dsh web): ") + Utf8ToWide(engine) + L"\n";
+    text += L"Node.js: " + node;
+    MessageBoxW(hwnd_, text.c_str(), (zh ? L"关于" : L"About"), MB_OK | MB_ICONINFORMATION);
+}
+
+void MainWindow::OnSettings() {
+    std::wstring relay = mobileRelayUrl_;
+    bool zh = IsChinese();
+    std::vector<TemplateItem> items = {
+        { 101, L"Static", nullptr, SS_LEFT | WS_CHILD | WS_VISIBLE, 14, 14, 260, 18 },
+        { 103, L"Edit", L"", ES_LEFT | WS_BORDER | WS_TABSTOP | WS_CHILD | WS_VISIBLE, 14, 38, 260, 22 },
+        { 104, L"Static", nullptr, SS_LEFT | WS_CHILD | WS_VISIBLE, 14, 66, 260, 52 },
+        { IDOK, L"Button", L"OK", BS_PUSHBUTTON | WS_TABSTOP | WS_CHILD | WS_VISIBLE, 120, 128, 60, 24 },
+        { IDCANCEL, L"Button", L"Cancel", BS_PUSHBUTTON | WS_TABSTOP | WS_CHILD | WS_VISIBLE, 190, 128, 60, 24 },
+    };
+    // Label and hint text are set in WM_INITDIALOG (dynamic text).
+    HGLOBAL tmpl = BuildDialogTemplate(zh ? L"设置" : L"Settings", 288, 162, items);
+    if (!tmpl) return;
+    DialogBoxIndirectParamW(GetModuleHandleW(nullptr),
+                            reinterpret_cast<LPCTSTR>(tmpl),
+                            hwnd_, SettingsDlgProc,
+                            reinterpret_cast<LPARAM>(&relay));
+    GlobalFree(tmpl);
+    if (relay != mobileRelayUrl_) {
+        mobileRelayUrl_ = relay;
+        SaveSettings();
+    }
+}
+
+void MainWindow::OnMobileRemote() {
+    if (bridgeRunning_) {
+        bool zh = IsChinese();
+        int r = MessageBoxW(hwnd_, zh ? L"已连接，是否断开？" : L"Connected. Disconnect?",
+                            zh ? L"远程连接" : L"Remote Connect",
+                            MB_YESNO | MB_ICONQUESTION);
+        if (r == IDYES) StopBridge();
+        return;
+    }
+
+    // Relay address comes from Settings… (mobileRelayUrl_).
+    if (mobileRelayUrl_.empty()) {
+        bool zh = IsChinese();
+        int r = MessageBoxW(hwnd_,
+                            zh ? L"尚未配置中继地址。请先在「设置…」中填写中继地址，再使用远程连接。"
+                               : L"Relay address not configured. Set it in Settings… first, then use Remote Connect.",
+                            zh ? L"远程连接" : L"Remote Connect",
+                            MB_OKCANCEL | MB_ICONINFORMATION);
+        if (r == IDOK) OnSettings();
+        return;
+    }
+
+    // Shell-generated device ID + pairing QR (relay host + device ID, plus the
+    // LAN address of the bridge's direct-connect proxy so the phone can prefer
+    // a direct connection and fall back to the relay).
+    deviceId_ = DeviceID();
+    std::string lan = LocalLANAddress();
+    if (!lan.empty()) lan += ":13080";
+    qrPNG_ = GenerateQRPNG(PairingQRContent(mobileRelayUrl_, deviceId_, lan));
+    if (qrPNG_.empty()) {
+        bool zh = IsChinese();
+        MessageBoxW(hwnd_, zh ? L"生成配对二维码失败。" : L"Failed to generate the pairing QR code.",
+                    zh ? L"远程连接" : L"Remote Connect", MB_OK | MB_ICONERROR);
+        return;
+    }
+    registered_ = false;
+
+    // Registration must succeed within 12s or the relay is unreachable.
+    registerTimerId_ = SetTimer(hwnd_, kRegisterTimerId, 12000, nullptr);
+
+    StartBridge(mobileRelayUrl_, deviceId_);
+}
+
+void MainWindow::StartBridge(const std::wstring& relay, const std::string& deviceId) {
+    std::wstring node = NodePath();
+    if (node.empty()) {
+        MessageBoxW(hwnd_, IsChinese() ? L"未找到 Node.js。" : L"Node.js not found.",
+                    L"DSH WebView", MB_ICONERROR | MB_OK);
+        return;
+    }
+    // Bridge script: $DSH_BRIDGE_DIR, or next to the executable.
+    std::wstring bridge;
+    if (const wchar_t* env = _wgetenv(L"DSH_BRIDGE_DIR"); env && env[0]) {
+        bridge = std::wstring(env) + L"\\bridge.mjs";
+    }
+    if (bridge.empty() || GetFileAttributesW(bridge.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        wchar_t exe[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring dir = exe;
+        dir = dir.substr(0, dir.find_last_of(L"\\/"));
+        bridge = dir + L"\\bridge\\bridge.mjs";
+    }
+    if (GetFileAttributesW(bridge.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        MessageBoxW(hwnd_, IsChinese() ? L"未找到远程连接桥接脚本（bridge.mjs）。"
+                                       : L"Remote connect bridge script (bridge.mjs) not found.",
+                    L"DSH WebView", MB_ICONERROR | MB_OK);
+        return;
+    }
+
+    SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
+    HANDLE outRead = nullptr, outWrite = nullptr;
+    if (!CreatePipe(&outRead, &outWrite, &sa, 0)) return;
+    SetHandleInformation(outRead, HANDLE_FLAG_INHERIT, 0);
+
+    std::wstring cmd = L"\"" + node + L"\" \"" + bridge + L"\" --relay " + relay +
+                       L" --dsh-port " + std::to_wstring(ServerManager::Port()) +
+                       L" --device-id " + Utf8ToWide(deviceId) +
+                       L" --pin " + StablePairingPin();
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = outWrite;
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(node.c_str(), &cmd[0], nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(outRead);
+        CloseHandle(outWrite);
+        return;
+    }
+    CloseHandle(outWrite);
+    CloseHandle(pi.hThread);
+    bridgeProc_ = pi;
+    bridgeStdout_ = outRead;
+    bridgeRunning_ = true;
+    bridgeBuffer_.clear();
+    bridgeThread_ = CreateThread(nullptr, 0, BridgeReaderThread, this, 0, nullptr);
+}
+
+void MainWindow::StopBridge() {
+    bridgeRunning_ = false;
+    if (bridgeProc_.hProcess) {
+        TerminateProcess(bridgeProc_.hProcess, 1);
+        WaitForSingleObject(bridgeProc_.hProcess, 5000);
+        CloseHandle(bridgeProc_.hProcess);
+        bridgeProc_ = {};
+    }
+    if (bridgeStdout_) { CloseHandle(bridgeStdout_); bridgeStdout_ = nullptr; }
+    if (bridgeThread_) {
+        WaitForSingleObject(bridgeThread_, 5000);
+        CloseHandle(bridgeThread_);
+        bridgeThread_ = nullptr;
+    }
+}
+
+DWORD WINAPI MainWindow::BridgeReaderThread(LPVOID param) {
+    auto* self = static_cast<MainWindow*>(param);
+    char buf[4096];
+    DWORD got = 0;
+    std::string acc;
+    for (;;) {
+        if (!ReadFile(self->bridgeStdout_, buf, sizeof(buf), &got, nullptr) || got == 0) break;
+        acc.append(buf, got);
+        size_t nl;
+        while ((nl = acc.find('\n')) != std::string::npos) {
+            std::string line = acc.substr(0, nl);
+            acc.erase(0, nl + 1);
+            if (!line.empty()) PostString(kWM_BridgeLine, Utf8ToWide(line));
+        }
+    }
+    return 0;
+}
+
+void MainWindow::OnBridgeLine(const std::wstring* line) {
+    if (!line) return;
+    std::string utf8 = WideToUtf8(*line);
+    delete line;
+    std::string event;
+    if (!JsonGetString(utf8, "event", event)) return;
+    if (event == "registered") {
+        registered_ = true;
+        if (registerTimerId_ != 0) {
+            KillTimer(hwnd_, kRegisterTimerId);
+            registerTimerId_ = 0;
+        }
+        std::string pin;
+        JsonGetString(utf8, "pin", pin);
+        ShowPairingDialog(Utf8ToWide(pin), Utf8ToWide(deviceId_), qrPNG_);
+    }
+}
+
+INT_PTR CALLBACK MainWindow::PairingDialogProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (msg == WM_INITDIALOG) {
+        auto* ctx = reinterpret_cast<PairingCtx*>(lParam);
+        SetWindowLongPtrW(hDlg, DWLP_USER, lParam);
+        bool zh = MainWindow::Instance().IsChinese();
+        SetDlgItemTextW(hDlg, 103, (zh ? L"PIN: " : L"PIN: ") + ctx->pin);
+        SetDlgItemTextW(hDlg, 104, (zh ? L"设备码: " : L"Device ID: ") + ctx->deviceId);
+        SetDlgItemTextW(hDlg, 105, zh ? L"在 Harness 远程 App 中扫描上方二维码；或手动输入设备码与 PIN。"
+                                      : L"Scan the QR code in the Harness Remote app, or enter the device ID and PIN manually.");
+        if (!ctx->qrPNG.empty()) {
+            HBITMAP hbmp = HBitmapFromPng(reinterpret_cast<const BYTE*>(ctx->qrPNG.data()),
+                                          ctx->qrPNG.size());
+            if (hbmp) {
+                HWND qr = GetDlgItem(hDlg, 102);
+                HBITMAP old = reinterpret_cast<HBITMAP>(SendMessageW(qr, STM_SETIMAGE,
+                                                                     IMAGE_BITMAP,
+                                                                     reinterpret_cast<LPARAM>(hbmp)));
+                if (old) DeleteObject(old);
+            }
+        }
+        return TRUE;
+    }
+    if (msg == WM_COMMAND && LOWORD(wParam) == IDOK) {
+        EndDialog(hDlg, IDOK);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+void MainWindow::ShowPairingDialog(const std::wstring& pin, const std::wstring& deviceId,
+                                   const std::string& qrPNG) {
+    bool zh = IsChinese();
+    std::vector<TemplateItem> items = {
+        { 102, L"Static", L"", SS_BITMAP | SS_CENTERIMAGE | WS_CHILD | WS_VISIBLE, 14, 14, 200, 200 },
+        { 103, L"Static", L"", SS_CENTER | WS_CHILD | WS_VISIBLE, 14, 224, 200, 32 },
+        { 104, L"Static", L"", SS_CENTER | WS_CHILD | WS_VISIBLE, 14, 258, 200, 26 },
+        { 105, L"Static", L"", SS_CENTER | WS_CHILD | WS_VISIBLE, 14, 288, 200, 44 },
+        { IDOK, L"Button", L"OK", BS_PUSHBUTTON | WS_TABSTOP | WS_CHILD | WS_VISIBLE, 90, 340, 60, 24 },
+    };
+    PairingCtx ctx{ pin, deviceId, qrPNG };
+    HGLOBAL tmpl = BuildDialogTemplate(zh ? L"远程连接配对" : L"Remote Connect Pairing", 228, 372, items);
+    if (!tmpl) return;
+    DialogBoxIndirectParamW(GetModuleHandleW(nullptr),
+                            reinterpret_cast<LPCTSTR>(tmpl),
+                            hwnd_, PairingDialogProc,
+                            reinterpret_cast<LPARAM>(&ctx));
+    GlobalFree(tmpl);
 }
 
 } // namespace dsh

@@ -220,6 +220,32 @@ std::string NpmRegistryUrl() {
                              : "https://registry.npmjs.org";
 }
 
+std::string NodeVersion() {
+    const char* node = g_find_program_in_path("node");
+    std::string candidate = node ? node : (BinDir() + "/node");
+    if (candidate.empty() || !FileExists(candidate)) return "";
+    std::vector<std::string> argv = { candidate, "--version" };
+    std::vector<char*> cargv;
+    for (auto& a : argv) cargv.push_back(const_cast<char*>(a.c_str()));
+    cargv.push_back(nullptr);
+    gchar* out = nullptr;
+    gchar* err = nullptr;
+    gint status = 0;
+    bool ok = g_spawn_sync(nullptr, cargv.data(), nullptr, G_SPAWN_SEARCH_PATH,
+                           nullptr, nullptr, &out, &err, &status, nullptr);
+    if (!ok || status != 0 || !out) {
+        g_free(out);
+        g_free(err);
+        return "";
+    }
+    std::string version(out);
+    g_free(out);
+    g_free(err);
+    size_t end = version.find_first_of("\r\n");
+    if (end != std::string::npos) version.erase(end);
+    return version;
+}
+
 bool Provide(const ProgressFn& onState) {
     if (RuntimeAvailable()) {
         if (onState) onState(State::Done, 0);

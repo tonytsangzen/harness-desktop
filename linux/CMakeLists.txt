@@ -5,6 +5,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# App version shown in the About dialog (override at release time, e.g.
+# -DAPP_VERSION=1.1.0).
+set(APP_VERSION "1.1.0" CACHE STRING "App version shown in About")
+
 # ---- Dependencies (system WebKitGTK = the Linux webview, like WKWebView /
 # WebView2 on the other platforms) ----
 find_package(PkgConfig REQUIRED)
@@ -20,9 +24,12 @@ add_executable(dshwebview
     src/update_manager.cpp
     src/node_runtime_manager.cpp
     src/main_window.cpp
+    ../third_party/qrcodegen/qrcodegen.c
 )
 
-target_include_directories(dshwebview PRIVATE src)
+target_include_directories(dshwebview PRIVATE src ../third_party/qrcodegen)
+
+target_compile_definitions(dshwebview PRIVATE APP_VERSION="${APP_VERSION}")
 
 target_link_libraries(dshwebview PRIVATE
     PkgConfig::WEBKIT

@@ -351,8 +351,21 @@ platforms and attaches everything to one GitHub Release:
 - Linux: portable tarball + `.deb` for **x86_64 and arm64** (arm64
   cross-compiled), built on ubuntu-22.04.
 
+A second [Flutter workflow](.github/workflows/flutter.yml) builds the mobile
+app and its artifacts are attached to the same Release:
+- Android: release APK (debug-keystore signed, sideloadable);
+- iOS: unsigned `Runner.app` zip (re-sign locally or add codesign secrets).
+
 All jobs run on a `v*` tag (or manual dispatch); a single `publish` job
 collects every artifact and attaches it to the Release.
+
+## Relay server (mobile remote connect)
+
+The phone connects through a small Go relay (`mobile/relay`). To host it for
+free — Oracle Cloud always-free VPS, Cloudflare Tunnel, or a domestic cloud
+trial — see the [deployment guide](mobile/relay/deploy/README.md) which
+includes a Dockerfile, an auto-HTTPS Caddy reverse proxy, and a
+docker-compose stack.
 
 ## Project layout
 

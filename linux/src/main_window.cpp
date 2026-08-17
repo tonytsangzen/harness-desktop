@@ -1,19 +1,34 @@
 #include "main_window.h"
 
+#ifndef APP_VERSION
+#define APP_VERSION "1.0.9"
+#endif
+
 #include "node_runtime_manager.h"
 #include "server_manager.h"
 #include "settings.h"
 #include "update_manager.h"
 #include "util.h"
 
+#include "../../third_party/qrcodegen/qrcodegen.h"
+
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 
 #include <climits>
 #include <cstdio>
+#include <algorithm>
+#include <signal.h>
 #include <string>
 
 #include <unistd.h>
+
+// LAN direct-connect address discovery (getifaddrs / getnameinfo).
+#include <ifaddrs.h>
+#include <netdb.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
 
 #include <gdk/gdkkeys.h>
 #include <gdk/gdkkeysyms.h>
@@ -217,6 +232,11 @@ void MainWindow::LoadSettings() {
             if (s == "zh") lang_ = Lang::Zh;
             else if (s == "en") lang_ = Lang::En;
         }
+        if (gchar* v = g_key_file_get_string(kf, "app", "relay", nullptr)) {
+            std::string s = v;
+            g_free(v);
+            if (!s.empty()) mobileRelayUrl_ = s;
+        }
     }
     g_key_file_free(kf);
 }
@@ -227,6 +247,7 @@ void MainWindow::SaveSettings() {
                           theme_ == Theme::Light ? "light" : (theme_ == Theme::Dark ? "dark" : "system"));
     g_key_file_set_string(kf, "app", "language",
                           lang_ == Lang::Zh ? "zh" : (lang_ == Lang::En ? "en" : "system"));
+    g_key_file_set_string(kf, "app", "relay", mobileRelayUrl_.c_str());
     gsize len = 0;
     gchar* data = g_key_file_to_data(kf, &len, nullptr);
     if (data) {
@@ -423,6 +444,27 @@ void MainWindow::RebuildMenu() {
         gtk_menu_shell_append(GTK_MENU_SHELL(menubar_), item);
     }
 
+    // ---- Settings ----
+    {
+        GtkWidget* item = gtk_menu_item_new_with_label(zh ? "设置…" : "Settings…");
+        g_signal_connect(item, "activate", G_CALLBACK(OnSettingsActivate), this);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menubar_), item);
+    }
+
+    // ---- About ----
+    {
+        GtkWidget* item = gtk_menu_item_new_with_label(zh ? "关于…" : "About…");
+        g_signal_connect(item, "activate", G_CALLBACK(OnAboutActivate), this);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menubar_), item);
+    }
+
+    // ---- Mobile remote ----
+    {
+        GtkWidget* item = gtk_menu_item_new_with_label(zh ? "远程连接…" : "Remote Connect…");
+        g_signal_connect(item, "activate", G_CALLBACK(OnMobileRemoteActivate), this);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menubar_), item);
+    }
+
     // Re-insert the fresh menu bar at the top of the main vbox (index 0).
     GtkWidget* box = gtk_bin_get_child(GTK_BIN(window_));
     gtk_box_pack_start(GTK_BOX(box), menubar_, FALSE, FALSE, 0);
@@ -522,6 +564,8 @@ void MainWindow::OpenExternal(const std::string& uri) {
 }
 
 bool MainWindow::IsAppUrl(const std::string& uri) const {
+    // Remote mode: only the configured remote origin navigates inside the
+    // webview.
     // Only pages served by the local dsh server navigate inside the webview.
     std::string prefix = "http://" + settings_->host + ":" + std::to_string(ServerManager::ActivePort());
     if (uri.compare(0, prefix.size(), prefix) != 0) return false;
@@ -879,6 +923,74 @@ void MainWindow::OnPluginsMarketActivate(GtkWidget* /*item*/, gpointer userData)
     self->OpenExternal("https://tonytsangzen.github.io/harness-market/");
 }
 
+void MainWindow::OnAboutActivate(GtkWidget* /*item*/, gpointer userData) {
+    auto* self = static_cast<MainWindow*>(userData);
+    bool zh = self->IsChinese();
+
+    std::string engine = LocalVersion();
+    if (engine.empty()) engine = zh ? "未安装" : "not installed";
+    std::string node = NodeRuntimeManager::NodeVersion();
+    if (node.empty()) node = zh ? "未安装" : "not installed";
+
+    std::string comments;
+    if (zh) {
+        comments = "引擎（dsh web）: " + engine + "\nNode.js: " + node;
+    } else {
+        comments = "Engine (dsh web): " + engine + "\nNode.js: " + node;
+    }
+
+    gtk_show_about_dialog(GTK_WINDOW(self->window_),
+                          "program-name", "DeepSeek Harness",
+                          "version", APP_VERSION,
+                          "comments", comments.c_str(),
+                          nullptr);
+}
+
+void MainWindow::OnSettingsActivate(GtkWidget* /*item*/, gpointer userData) {
+    auto* self = static_cast<MainWindow*>(userData);
+    bool zh = self->IsChinese();
+    GtkWidget* dlg = gtk_dialog_new_with_buttons(
+        zh ? "设置" : "Settings", GTK_WINDOW(self->window_), GTK_DIALOG_MODAL,
+        "OK", GTK_RESPONSE_ACCEPT, "Cancel", GTK_RESPONSE_REJECT, nullptr);
+    GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 12);
+    gtk_box_pack_start(GTK_BOX(content), box, FALSE, FALSE, 0);
+
+    GtkWidget* entry = gtk_entry_new();
+    if (!self->mobileRelayUrl_.empty()) {
+        gtk_entry_set_text(GTK_ENTRY(entry), self->mobileRelayUrl_.c_str());
+    }
+    gtk_entry_set_placeholder_text(GTK_ENTRY(entry), "relay.example.com:8443");
+    gtk_widget_set_size_request(entry, 340, -1);
+    gtk_box_pack_start(GTK_BOX(box), entry, FALSE, FALSE, 0);
+
+    GtkWidget* hint = gtk_label_new(
+        (zh ? "远程 App 通过该云端中继连接本机。保存后「远程连接」使用此地址。"
+            : "The remote app connects to this machine through this cloud relay. "
+              "Used by Remote Connect."));
+    gtk_label_set_line_wrap(GTK_LABEL(hint), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(hint), 0);
+    gtk_box_pack_start(GTK_BOX(box), hint, FALSE, FALSE, 0);
+
+    gtk_widget_show_all(content);
+    if (gtk_dialog_run(GTK_DIALOG(dlg)) != GTK_RESPONSE_ACCEPT) {
+        gtk_widget_destroy(dlg);
+        return;
+    }
+    std::string raw = gtk_entry_get_text(GTK_ENTRY(entry));
+    size_t b = raw.find_first_not_of(" \t\r\n");
+    size_t e = raw.find_last_not_of(" \t\r\n");
+    raw = (b == std::string::npos) ? "" : raw.substr(b, e - b + 1);
+    if (!raw.empty() && raw.rfind("http://", 0) != 0 && raw.rfind("https://", 0) != 0) {
+        // Loopback addresses usually run a plain-HTTP test relay.
+        raw = IsLoopbackHost(raw) ? "http://" + raw : "https://" + raw;
+    }
+    self->mobileRelayUrl_ = raw;
+    self->SaveSettings();
+    gtk_widget_destroy(dlg);
+}
+
 void MainWindow::OnEditActivate(GtkWidget* item, gpointer userData) {
     auto* self = static_cast<MainWindow*>(userData);
     if (!self->webview_) return;
@@ -892,6 +1004,396 @@ void MainWindow::OnEditActivate(GtkWidget* item, gpointer userData) {
         case kEditPaste: SendKey(self->webview_, GDK_KEY_v, GDK_CONTROL_MASK); break;
         case kEditSelectAll: SendKey(self->webview_, GDK_KEY_a, GDK_CONTROL_MASK); break;
     }
+}
+
+// MARK: - Mobile remote (relay bridge)
+
+namespace {
+
+// True for localhost / 127.x / ::1 — where a plain-HTTP relay is expected
+// during testing (scheme auto-completion uses this).
+bool IsLoopbackHost(const std::string& hostOrAddr) {
+    std::string h = hostOrAddr;
+    std::transform(h.begin(), h.end(), h.begin(), ::tolower);
+    return h == "localhost" || h == "::1" || h.rfind("127.", 0) == 0;
+}
+
+// 13-digit random device ID derived from device info (hostname + machine-id),
+// stable across launches so reconnects reuse the same host identity.
+std::string DeviceID() {
+    std::string seed = g_get_host_name();
+    if (g_file_test("/etc/machine-id", G_FILE_TEST_IS_REGULAR)) {
+        gchar* contents = nullptr;
+        if (g_file_get_contents("/etc/machine-id", &contents, nullptr, nullptr)) {
+            seed += "|" + std::string(contents);
+            g_free(contents);
+        }
+    }
+    gchar* digest = g_compute_checksum_for_string(G_CHECKSUM_SHA256, seed.c_str(), -1);
+    unsigned long long value = 0;
+    if (digest) {
+        for (int i = 0; i < 8 && digest[i]; i++) value = (value << 8) | (unsigned char)digest[i];
+        g_free(digest);
+    }
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%013llu", value % 10000000000000ULL);
+    return buf;
+}
+
+// First non-loopback IPv4 address in a private range (LAN direct connect),
+// mirroring the macOS shell so the phone can prefer a direct LAN connection.
+std::string LocalLANAddress() {
+    std::string result;
+    ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) != 0) return "";
+    for (ifaddrs* cur = ifaddr; cur; cur = cur->ifa_next) {
+        if (!cur->ifa_addr || cur->ifa_addr->sa_family != AF_INET) continue;
+        unsigned flags = cur->ifa_flags;
+        if ((flags & IFF_UP) == 0 || (flags & IFF_LOOPBACK) != 0) continue;
+        char host[NI_MAXHOST] = {};
+        if (getnameinfo(cur->ifa_addr, sizeof(sockaddr_in), host, sizeof(host),
+                        nullptr, 0, NI_NUMERICHOST) != 0) {
+            continue;
+        }
+        std::string s = host;
+        if (s.rfind("192.168.", 0) == 0) { freeifaddrs(ifaddr); return s; } // prefer 192.168.*
+        if (s.rfind("10.", 0) == 0 || s.rfind("172.", 0) == 0) {
+            if (result.empty()) result = s;
+        }
+    }
+    freeifaddrs(ifaddr);
+    return result;
+}
+
+// Stable pairing PIN: generated once, then kept in ~/.config/deepseek-harness/pin
+// so reconnects reuse the same host identity (mirrors the macOS shell's PIN).
+std::string StablePairingPin() {
+    std::string path = ConfigDir() + "/pin";
+    std::string existing;
+    if (ReadFileText(path, existing)) {
+        existing.erase(existing.find_last_not_of(" \t\r\n") + 1);
+        if (existing.size() == 6 &&
+            existing.find_first_not_of("0123456789") == std::string::npos) {
+            return existing;
+        }
+    }
+    std::string npin;
+    GRand* r = g_rand_new();
+    for (int i = 0; i < 6; i++) npin += static_cast<char>('0' + g_rand_int_range(r, 0, 10));
+    g_rand_free(r);
+    WriteFileText(path, npin);
+    return npin;
+}
+
+// The pairing QR content: relay host + device ID, plus the relay's own scheme
+// (http for plaintext test relays, https otherwise) so the phone connects
+// with a matching protocol. `lanAddress` (e.g. "192.168.1.5:13080") lets the
+// phone prefer a direct LAN connection to this desktop's dsh web and only
+// fall back to the cloud relay when it can't reach it.
+std::string PairingQRContent(const std::string& relayUrl, const std::string& deviceId,
+                             const std::string& lanAddress) {
+    std::string scheme = "https";
+    std::string host = relayUrl;
+    size_t sep = host.find("://");
+    if (sep != std::string::npos) {
+        scheme = host.substr(0, sep);
+        host = host.substr(sep + 3);
+    }
+    size_t slash = host.find('/');
+    if (slash != std::string::npos) host = host.substr(0, slash);
+    std::string qr = "relay://" + host + "/pair?device=" + deviceId + "&scheme=" + scheme;
+    if (!lanAddress.empty()) qr += "&lan=" + lanAddress;
+    return qr;
+}
+
+// Renders a QR code as PNG data using the vendored qrcodegen library.
+std::string GenerateQRPNG(const std::string& content) {
+    uint8_t qrcode[qrcodegen_BUFFER_LEN_MAX];
+    uint8_t temp[qrcodegen_BUFFER_LEN_MAX];
+    if (!qrcodegen_encodeText(content.c_str(), temp, qrcode, qrcodegen_Ecc_MEDIUM,
+                              qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX,
+                              qrcodegen_Mask_AUTO, true)) {
+        return "";
+    }
+    int size = qrcodegen_getSize(qrcode);
+    const int scale = 10;
+    int dim = size * scale;
+    GdkPixbuf* pixbuf = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, dim, dim);
+    if (!pixbuf) return "";
+    int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+    guchar* px = gdk_pixbuf_get_pixels(pixbuf);
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            bool dark = qrcodegen_getModule(qrcode, x, y);
+            guchar r = dark ? 0 : 255;
+            guchar g = dark ? 0 : 255;
+            guchar b = dark ? 0 : 255;
+            for (int dy = 0; dy < scale; dy++) {
+                for (int dx = 0; dx < scale; dx++) {
+                    int ox = x * scale + dx, oy = y * scale + dy;
+                    guchar* p = px + oy * rowstride + ox * 3;
+                    p[0] = r; p[1] = g; p[2] = b;
+                }
+            }
+        }
+    }
+    gchar* data = nullptr;
+    gsize len = 0;
+    gdk_pixbuf_save_to_buffer(pixbuf, &data, &len, "png", nullptr, nullptr);
+    g_object_unref(pixbuf);
+    std::string out = data ? std::string(data, len) : "";
+    g_free(data);
+    return out;
+}
+
+// Locate the bridge script: $DSH_BRIDGE_DIR, next to the executable, or the
+// repository layout (mobile/bridge) two levels up from the build dir.
+std::string FindBridgeScript() {
+    if (const char* env = g_getenv("DSH_BRIDGE_DIR"); env && env[0]) {
+        std::string p = std::string(env) + "/bridge.mjs";
+        if (g_file_test(p.c_str(), G_FILE_TEST_IS_REGULAR)) return p;
+    }
+    gchar* exe = g_file_read_link("/proc/self/exe", nullptr);
+    if (!exe) exe = g_strdup(g_getenv("_"));
+    if (exe) {
+        std::string dir = g_path_get_dirname(exe);
+        g_free(exe);
+        std::string p = dir + "/bridge/bridge.mjs";
+        if (g_file_test(p.c_str(), G_FILE_TEST_IS_REGULAR)) return p;
+        // repo layout: <exe_dir>/../../mobile/bridge/bridge.mjs
+        p = dir + "/../../mobile/bridge/bridge.mjs";
+        if (g_file_test(p.c_str(), G_FILE_TEST_IS_REGULAR)) return p;
+    }
+    return "";
+}
+
+} // namespace
+
+void MainWindow::OnMobileRemoteActivate(GtkWidget* /*item*/, gpointer userData) {
+    auto* self = static_cast<MainWindow*>(userData);
+    if (self->bridgePid_ > 0) {
+        GtkWidget* dlg = gtk_message_dialog_new(
+            GTK_WINDOW(self->window_), GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+            "%s", self->IsChinese() ? "已连接，是否断开？" : "Connected. Disconnect?");
+        gtk_dialog_add_buttons(GTK_DIALOG(dlg),
+                               self->IsChinese() ? "停止远程" : "Stop Remote", GTK_RESPONSE_ACCEPT,
+                               "OK", GTK_RESPONSE_CLOSE, nullptr);
+        if (gtk_dialog_run(GTK_DIALOG(dlg)) == GTK_RESPONSE_ACCEPT) {
+            self->StopMobileBridge();
+        }
+        gtk_widget_destroy(dlg);
+        return;
+    }
+
+    // Relay address comes from Settings… (mobileRelayUrl_).
+    if (self->mobileRelayUrl_.empty()) {
+        GtkWidget* dlg = gtk_message_dialog_new(
+            GTK_WINDOW(self->window_), GTK_DIALOG_MODAL, GTK_MESSAGE_INFO, GTK_BUTTONS_NONE,
+            "%s", self->IsChinese()
+                ? "尚未配置中继地址。请先在「设置…」中填写中继地址，再使用远程连接。"
+                : "Relay address not configured. Set it in Settings… first, then use Remote Connect.");
+        gtk_dialog_add_buttons(GTK_DIALOG(dlg),
+                               (self->IsChinese() ? "设置…" : "Settings…"), GTK_RESPONSE_ACCEPT,
+                               "Cancel", GTK_RESPONSE_CANCEL, nullptr);
+        gint resp = gtk_dialog_run(GTK_DIALOG(dlg));
+        gtk_widget_destroy(dlg);
+        if (resp == GTK_RESPONSE_ACCEPT) self->OnSettingsActivate(nullptr, self);
+        return;
+    }
+
+    // Shell-generated device ID + pairing QR (relay host + device ID, plus the
+    // LAN address of the bridge's direct-connect proxy so the phone can prefer
+    // a direct connection and fall back to the relay).
+    std::string deviceId = DeviceID();
+    std::string lan = LocalLANAddress();
+    if (!lan.empty()) lan += ":13080";
+    std::string qrContent = PairingQRContent(self->mobileRelayUrl_, deviceId, lan);
+    std::string qrPNG = GenerateQRPNG(qrContent);
+    if (qrPNG.empty()) {
+        self->ShowError(IsChinese() ? "生成配对二维码失败。"
+                                    : "Failed to generate the pairing QR code.");
+        return;
+    }
+    self->deviceId_ = deviceId;
+    self->qrPNG_ = qrPNG;
+    self->registered_ = false;
+
+    // Registration must succeed within 12s or the relay is unreachable.
+    self->registerTimeoutId_ = g_timeout_add(12000, +[](gpointer data) -> gboolean {
+        auto* mw = static_cast<MainWindow*>(data);
+        if (mw->registered_) return G_SOURCE_REMOVE;
+        mw->StopMobileBridge();
+        mw->ShowError(mw->IsChinese() ? "中继服务器不可用。请检查「设置…」中的中继地址后重试。"
+                                      : "Relay server unreachable. Check the relay address in Settings… and try again.");
+        return G_SOURCE_REMOVE;
+    }, self);
+
+    self->StartMobileBridge(self->mobileRelayUrl_, deviceId);
+}
+
+void MainWindow::StartMobileBridge(const std::string& relay, const std::string& deviceId) {
+    std::string bridge = FindBridgeScript();
+    if (bridge.empty()) {
+        ShowError(IsChinese() ? "未找到远程连接桥接脚本（bridge.mjs）。"
+                              : "Remote connect bridge script (bridge.mjs) not found.");
+        return;
+    }
+    // Prefer the auto-installed node; fall back to PATH.
+    std::string node = NodeRuntimeManager::InstallDir() + "/bin/node";
+    if (!g_file_test(node.c_str(), G_FILE_TEST_IS_EXECUTABLE)) {
+        gchar* found = g_find_program_in_path("node");
+        node = found ? found : "";
+        g_free(found);
+    }
+    if (node.empty()) {
+        ShowError(IsChinese() ? "未找到 Node.js。"
+                              : "Node.js not found.");
+        return;
+    }
+
+    std::string portStr = std::to_string(settings_->port);
+    std::string pin = StablePairingPin();
+    gchar* argv[] = { const_cast<gchar*>(node.c_str()),
+                      const_cast<gchar*>(bridge.c_str()),
+                      const_cast<gchar*>("--relay"),
+                      const_cast<gchar*>(relay.c_str()),
+                      const_cast<gchar*>("--dsh-port"),
+                      const_cast<gchar*>(portStr.c_str()),
+                      const_cast<gchar*>("--device-id"),
+                      const_cast<gchar*>(deviceId.c_str()),
+                      const_cast<gchar*>("--pin"),
+                      const_cast<gchar*>(pin.c_str()),
+                      nullptr };
+    gint stdoutFd = -1;
+    GError* err = nullptr;
+    GPid pid = 0;
+    if (!g_spawn_async_with_pipes(nullptr, argv, nullptr,
+                                  static_cast<GSpawnFlags>(G_SPAWN_DO_NOT_REAP_CHILD),
+                                  nullptr, nullptr, &pid, nullptr, &stdoutFd, nullptr, &err)) {
+        ShowError(std::string("bridge: ") + (err ? err->message : "spawn failed"));
+        g_clear_error(&err);
+        return;
+    }
+    bridgePid_ = pid;
+    bridgeBuffer_.clear();
+    GIOChannel* ch = g_io_channel_unix_new(stdoutFd);
+    g_io_channel_set_encoding(ch, nullptr, nullptr); // binary-safe
+    g_io_add_watch(ch, G_IO_IN | G_IO_HUP, OnBridgeOutput, this);
+    g_io_channel_unref(ch);
+    g_child_watch_add(pid, OnBridgeExit, this);
+}
+
+void MainWindow::StopMobileBridge() {
+    if (bridgePid_ > 0) {
+        kill(bridgePid_, SIGTERM);
+    }
+}
+
+gboolean MainWindow::OnBridgeOutput(GIOChannel* channel, GIOCondition cond, gpointer userData) {
+    auto* self = static_cast<MainWindow*>(userData);
+    if (cond & G_IO_HUP) return FALSE;
+    gchar buf[4096];
+    gsize got = 0;
+    GError* err = nullptr;
+    GIOStatus st = g_io_channel_read_chars(channel, buf, sizeof(buf) - 1, &got, &err);
+    if (st == G_IO_STATUS_ERROR || st == G_IO_STATUS_EOF) {
+        g_clear_error(&err);
+        return FALSE;
+    }
+    if (got == 0) return TRUE;
+    buf[got] = 0;
+    self->bridgeBuffer_ += buf;
+
+    // The bridge prints one JSON event per line. Extract the fields we need
+    // with a tiny scanner (our own output: no escaped quotes inside values).
+    auto fieldOf = [](const std::string& line, const char* key) -> std::string {
+        std::string needle = std::string("\"") + key + "\":\"";
+        size_t pos = line.find(needle);
+        if (pos == std::string::npos) return "";
+        pos += needle.size();
+        size_t end = line.find('"', pos);
+        if (end == std::string::npos) return "";
+        return line.substr(pos, end - pos);
+    };
+    auto eventOf = [](const std::string& line) -> std::string {
+        return fieldOf(line, "event");
+    };
+
+    size_t nl;
+    while ((nl = self->bridgeBuffer_.find('\n')) != std::string::npos) {
+        std::string line = self->bridgeBuffer_.substr(0, nl);
+        self->bridgeBuffer_.erase(0, nl + 1);
+        if (line.empty()) continue;
+        std::string event = eventOf(line);
+        if (event == "registered") {
+            self->registered_ = true;
+            if (self->registerTimeoutId_ > 0) {
+                g_source_remove(self->registerTimeoutId_);
+                self->registerTimeoutId_ = 0;
+            }
+            self->ShowPairingDialog(fieldOf(line, "pin"), self->deviceId_, self->qrPNG_);
+        }
+    }
+    return TRUE;
+}
+
+void MainWindow::OnBridgeExit(GPid pid, gint /*status*/, gpointer userData) {
+    auto* self = static_cast<MainWindow*>(userData);
+    g_spawn_close_pid(pid);
+    if (self->bridgePid_ == pid) self->bridgePid_ = 0;
+}
+
+void MainWindow::ShowPairingDialog(const std::string& pin, const std::string& deviceId,
+                                   const std::string& qrPNG) {
+    if (pairingDialog_) gtk_widget_destroy(pairingDialog_);
+    GtkWidget* dlg = gtk_dialog_new_with_buttons(
+        IsChinese() ? "远程连接配对" : "Remote Connect Pairing", GTK_WINDOW(window_),
+        GTK_DIALOG_MODAL, "OK", GTK_RESPONSE_CLOSE, nullptr);
+    pairingDialog_ = dlg;
+    GtkWidget* content = gtk_dialog_get_content_area(GTK_DIALOG(dlg));
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_container_set_border_width(GTK_CONTAINER(box), 16);
+    gtk_box_pack_start(GTK_BOX(content), box, FALSE, FALSE, 0);
+
+    // Shell-generated QR PNG (relay host + device ID).
+    GtkWidget* qrImage = gtk_image_new();
+    gtk_widget_set_size_request(qrImage, 240, 240);
+    gtk_box_pack_start(GTK_BOX(box), qrImage, FALSE, FALSE, 0);
+    if (!qrPNG.empty()) {
+        GdkPixbufLoader* loader = gdk_pixbuf_loader_new();
+        if (gdk_pixbuf_loader_write(loader, reinterpret_cast<const guchar*>(qrPNG.data()),
+                                    qrPNG.size(), nullptr) &&
+            gdk_pixbuf_loader_close(loader, nullptr)) {
+            GdkPixbuf* pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
+            if (pixbuf) gtk_image_set_from_pixbuf(GTK_IMAGE(qrImage), pixbuf);
+        }
+        g_object_unref(loader);
+    }
+
+    std::string pinText = (IsChinese() ? "PIN: " : "PIN: ") + pin;
+    GtkWidget* pinLabel = gtk_label_new(pinText.c_str());
+    PangoAttrList* attrs = pango_attr_list_new();
+    pango_attr_list_insert(attrs, pango_attr_size_new_absolute(28 * PANGO_SCALE));
+    pango_attr_list_insert(attrs, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    gtk_label_set_attributes(GTK_LABEL(pinLabel), attrs);
+    pango_attr_list_unref(attrs);
+    gtk_box_pack_start(GTK_BOX(box), pinLabel, FALSE, FALSE, 0);
+
+    std::string codeText = (IsChinese() ? "设备码: " : "Device ID: ") + deviceId;
+    GtkWidget* codeLabel = gtk_label_new(codeText.c_str());
+    gtk_label_set_selectable(GTK_LABEL(codeLabel), TRUE);
+    gtk_label_set_line_wrap(GTK_LABEL(codeLabel), TRUE);
+    gtk_box_pack_start(GTK_BOX(box), codeLabel, FALSE, FALSE, 0);
+
+    std::string hint = IsChinese()
+        ? "在 Harness 远程 App 中扫描上方二维码；或手动输入设备码与 PIN。"
+        : "Scan the QR code in the Harness Remote app, or enter the device ID and PIN manually.";
+    GtkWidget* hintLabel = gtk_label_new(hint.c_str());
+    gtk_label_set_line_wrap(GTK_LABEL(hintLabel), TRUE);
+    gtk_box_pack_start(GTK_BOX(box), hintLabel, FALSE, FALSE, 0);
+
+    gtk_widget_show_all(content);
+    g_signal_connect_swapped(dlg, "response", G_CALLBACK(gtk_widget_destroy), dlg);
 }
 
 } // namespace dsh

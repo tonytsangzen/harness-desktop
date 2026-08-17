@@ -1,0 +1,19 @@
+# Caddy 反代: 自动申请/续期 Let's Encrypt 证书, 提供 WSS + HTTPS。
+# 把下面的域名换成你自己的（需先把域名 A 记录指向本机公网 IP）。
+# 若在 Cloudflare 托管 DNS 且国内网络, 建议用 DNS-01 challenge:
+#   Caddy 会自动处理；若 80 端口被封(大陆常见), 用 Caddy 的 DNS challenge:
+#   https://caddyserver.com/docs/automatic-https#dns-challenge
+
+relay.example.com {
+	# WebSocket 长连接: Caddy 自动升级 HTTP/1.1 -> WS, 无需特殊配置
+	reverse_proxy 127.0.0.1:8080
+
+	# 健康检查可被公开轮询
+	handle /healthz {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	# 给中继足够长的连接（默认即无超时, 这里显式声明）
+	# 注意: 不要设置 request/response 超时, 否则会掐断长连接
+	# （Caddy 默认对反代无空闲超时, 保持默认即可）
+}

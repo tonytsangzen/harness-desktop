@@ -6,6 +6,7 @@
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <winhttp.h>
 
 #include <chrono>
 #include <filesystem>
@@ -22,6 +23,7 @@ namespace {
 Settings g_settings;
 HANDLE g_job = nullptr;
 HANDLE g_process = nullptr;
+bool g_reusing = false;
 
 std::wstring LogFilePath() {
     return JoinPath(GetTempDir(), L"DSHWebView-dsh.log");
@@ -125,6 +127,15 @@ std::wstring PrepareCommandLine() {
 bool Start() {
     Stop();
 
+    // Reuse an already-running dsh instance on the configured port (e.g. a
+    // leftover from a previous launch) instead of spawning a second, empty
+    // instance — the remote app would see no sessions on it.
+    if (LooksLikeDshWeb(g_settings.host, g_settings.port)) {
+        g_reusing = true;
+        return true;
+    }
+    g_reusing = false;
+
     std::wstring cmd = PrepareCommandLine();
     if (cmd.empty()) return false;
 
@@ -203,6 +214,47 @@ bool IsRunning() {
     return code == STILL_ACTIVE;
 }
 
+// True when the port already serves a web page (treated as an existing dsh
+// instance worth reusing). Uses a plain HTTP GET with short timeouts.
+bool LooksLikeDshWeb(const std::wstring& host, unsigned short port) {
+    HINTERNET session = WinHttpOpen(L"DSHWebView", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                    nullptr, nullptr, 0);
+    if (!session) return false;
+    HINTERNET conn = WinHttpConnect(session, host.c_str(), port, 0);
+    if (!conn) {
+        WinHttpCloseHandle(session);
+        return false;
+    }
+    HINTERNET req = WinHttpOpenRequest(conn, L"GET", L"/", nullptr, nullptr,
+                                       nullptr, WINHTTP_FLAG_BYPASS_PROXY_CACHE);
+    if (!req) {
+        WinHttpCloseHandle(conn);
+        WinHttpCloseHandle(session);
+        return false;
+    }
+    bool ok = false;
+    if (WinHttpSendRequest(req, nullptr, 0, nullptr, 0, 0, 0) &&
+        WinHttpReceiveResponse(req, nullptr)) {
+        DWORD status = 0;
+        DWORD statusLen = sizeof(status);
+        if (WinHttpQueryHeaders(req,
+                                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusLen, nullptr) &&
+            status == 200) {
+            wchar_t ctype[128] = {};
+            DWORD ctypeLen = sizeof(ctype);
+            if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_TYPE,
+                                    WINHTTP_HEADER_NAME_BY_INDEX, ctype, &ctypeLen, nullptr)) {
+                ok = wcsstr(ctype, L"text/html") != nullptr;
+            }
+        }
+    }
+    WinHttpCloseHandle(req);
+    WinHttpCloseHandle(conn);
+    WinHttpCloseHandle(session);
+    return ok;
+}
+
 void Stop() {
     if (g_process && g_job) {
         TerminateJobObject(g_job, 0);
@@ -230,7 +282,7 @@ bool WaitUntilReady(int timeoutMs, const std::function<void()>& onWaiting) {
 
     bool ready = false;
     while (std::chrono::steady_clock::now() < deadline) {
-        if (!IsRunning()) break;
+        if (!IsRunning() && !g_reusing) break;
 
         SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (sock != INVALID_SOCKET) {

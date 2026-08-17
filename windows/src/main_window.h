@@ -64,7 +64,7 @@ private:
     void OnCreate();
     void OnSize();
     void OnDestroy();
-    void OnTimer();
+    void OnTimer(WPARAM wParam);
 
     // Theme & language.
     bool IsChinese() const;
@@ -87,6 +87,29 @@ private:
     void LayoutChildWindows();
     void PaintOverlay();
     void PaintDownloadBar();
+
+    // ---- mobile remote (relay bridge) ----
+    void OnMobileRemote();
+    void OnSettings();
+    void OnAbout();
+    void StartBridge(const std::wstring& relay, const std::string& deviceId);
+    void StopBridge();
+    void ShowPairingDialog(const std::wstring& pin, const std::wstring& deviceId,
+                           const std::string& qrPNG);
+    void OnBridgeLine(const std::wstring* line);
+    static DWORD WINAPI BridgeReaderThread(LPVOID param);
+    static INT_PTR CALLBACK PairingDialogProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
+    static INT_PTR CALLBACK SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam);
+    PROCESS_INFORMATION bridgeProc_{};
+    HANDLE bridgeStdout_ = nullptr;
+    HANDLE bridgeThread_ = nullptr;
+    bool bridgeRunning_ = false;
+    std::wstring bridgeBuffer_; // bridge stdout line accumulation
+    std::wstring mobileRelayUrl_;
+    std::string deviceId_;
+    std::string qrPNG_;
+    bool registered_ = false;
+    UINT_PTR registerTimerId_ = 0;
 
     // WebView2 initialization (runs on the UI thread).
     void InitWebView2();

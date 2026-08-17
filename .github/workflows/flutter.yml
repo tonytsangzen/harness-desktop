@@ -1,0 +1,83 @@
+# Builds the mobile (Flutter) artifacts:
+#   - Android: release APK (uploaded as `android-apk`)
+#   - iOS:     unsigned Runner.app zipped as `ios-app` (--no-codesign)
+#
+# On a v* tag the artifacts are picked up by the `attach` job in release.yml
+# and attached to the GitHub Release automatically.
+#
+# Notes:
+#   * The Android APK is signed with the default debug keystore so it can be
+#     sideloaded; for store publishing configure a release keystore (see
+#     mobile/app/android/key.properties + signingConfigs).
+#   * The iOS artifact is unsigned: install with a provisioning profile /
+#     re-sign locally, or add codesign secrets to sign in CI.
+name: Flutter Mobile
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile/app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.41.7"
+          channel: stable
+          cache: true
+
+      - name: Resolve packages
+        run: flutter pub get
+
+      - name: Build release APK
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: mobile/app/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+  ios:
+    name: Build iOS app (unsigned)
+    runs-on: macos-14
+    defaults:
+      run:
+        working-directory: mobile/app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.41.7"
+          channel: stable
+          cache: true
+
+      - name: Resolve packages
+        run: flutter pub get
+
+      - name: Build iOS (no codesign)
+        run: flutter build ios --release --no-codesign
+
+      - name: Package Runner.app
+        run: |
+          cd build/ios/iphoneos
+          zip -rq ../../../../dsh-mobile-ios.app.zip Runner.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-app
+          path: mobile/app/dsh-mobile-ios.app.zip
+          if-no-files-found: error

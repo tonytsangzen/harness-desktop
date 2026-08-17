@@ -39,5 +39,9 @@ unsigned short Port();
 std::wstring Host();
 std::wstring Url();
 
+// True when host:port already serves a web page (an existing dsh instance
+// worth reusing instead of spawning a second, empty one).
+bool LooksLikeDshWeb(const std::wstring& host, unsigned short port);
+
 } // namespace ServerManager
 } // namespace dsh

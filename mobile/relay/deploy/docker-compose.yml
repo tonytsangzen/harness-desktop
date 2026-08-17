@@ -1,0 +1,32 @@
+# 一键部署: relay + Caddy (自动 HTTPS/WSS)
+# 用法:
+#   1) 改 Caddyfile 里的域名, 并确保 A 记录已指向本机
+#   2) docker compose -f deploy/docker-compose.yml up -d --build
+# 手机端 relay 地址填: https://relay.example.com
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    # 只暴露给本机 Caddy, 不直接对外
+    ports:
+      - "127.0.0.1:8080:8080"
+    # relay 为纯内存存储, 重启后需重新扫码配对
+    # （如需持久化, 见 deploy/README.md 的"持久化"小节）
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"   # HTTP -> 自动跳转 HTTPS (ACME http-01)
+      - "443:443" # HTTPS/WSS
+      - "443:443/udp" # HTTP/3 (可选)
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

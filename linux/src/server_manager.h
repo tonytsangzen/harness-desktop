@@ -28,6 +28,7 @@ void Stop();
 bool IsRunning();
 
 // Probes whether something already listens on host:port.
+bool LooksLikeDshWeb(const std::string& host, unsigned short port);
 bool TcpProbe(const std::string& host, unsigned short port, int timeoutMs);
 
 // Resolves the port the server should bind: the configured port when free,

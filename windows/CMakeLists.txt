@@ -5,6 +5,10 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# App version shown in the About dialog (override at release time, e.g.
+# -DAPP_VERSION=1.1.0).
+set(APP_VERSION "1.1.0" CACHE STRING "App version shown in About")
+
 if(NOT MSVC)
     message(FATAL_ERROR "DSHWebView requires MSVC (Visual Studio 2022).")
 endif()
@@ -53,14 +57,17 @@ add_executable(DSHWebView WIN32
     src/json.cpp
     src/util.cpp
     src/main_window.cpp
+    ../third_party/qrcodegen/qrcodegen.c
     resources.rc
 )
 
-target_include_directories(DSHWebView PRIVATE src "${WEBVIEW2_INCLUDE}")
+target_include_directories(DSHWebView PRIVATE src ../third_party/qrcodegen "${WEBVIEW2_INCLUDE}")
+
+target_compile_definitions(DSHWebView PRIVATE APP_VERSION="${APP_VERSION}")
 
 target_link_libraries(DSHWebView PRIVATE
     "${WEBVIEW2_LIB}"
-    winhttp ws2_32 shell32 shlwapi ole32 oleaut32 comctl32 advapi32 version user32 gdi32 uuid crypt32 dwmapi
+    winhttp ws2_32 shell32 shlwapi ole32 oleaut32 comctl32 advapi32 version user32 gdi32 uuid crypt32 dwmapi gdiplus
 )
 
 target_compile_options(DSHWebView PRIVATE /W3 /wd4996 /utf-8)

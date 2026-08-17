@@ -1,5 +1,7 @@
 import AppKit
 import WebKit
+import CommonCrypto
+import IOKit
 
 // MARK: - Configuration
 
@@ -41,6 +43,11 @@ enum AppLanguage: Int {
 struct MenuStrings {
     let checkForUpdates: String
     let quitFormat: String
+    let about: String
+    let aboutVersion: String
+    let aboutEngine: String
+    let aboutNode: String
+    let aboutNotInstalled: String
     let edit: String
     let undo: String
     let redo: String
@@ -58,10 +65,33 @@ struct MenuStrings {
     let exitFullScreen: String
     let help: String
     let pluginsMarket: String
+    let mobileRemote: String
+    let mobileRemoteActive: String
+    let mobileRemoteStop: String
+    let mobileRemoteRelay: String
+    let mobileRemotePin: String
+    let mobileRemoteCode: String
+    let mobileRemoteHint: String
+    let mobileRemoteWaiting: String
+    let mobileRemoteConnected: String
+    let mobileRemoteNoApp: String
+    let mobileRemoteGenerating: String
+    let relayUnreachable: String
+    let relayNotConfigured: String
+    let settings: String
+    let relayAddress: String
+    let relayHint: String
+    let pairingPin: String
+    let pairingPinHint: String
 
     static let english = MenuStrings(
         checkForUpdates: "Check for Updates…",
         quitFormat: "Quit %@",
+        about: "About DeepSeek Harness",
+        aboutVersion: "Version",
+        aboutEngine: "Engine (dsh web)",
+        aboutNode: "Node.js",
+        aboutNotInstalled: "not installed",
         edit: "Edit",
         undo: "Undo",
         redo: "Redo",
@@ -78,12 +108,35 @@ struct MenuStrings {
         enterFullScreen: "Enter Full Screen",
         exitFullScreen: "Exit Full Screen",
         help: "Help",
-        pluginsMarket: "Plugins Market…"
+        pluginsMarket: "Plugins Market…",
+        mobileRemote: "Remote Connect…",
+        mobileRemoteActive: "Connected.",
+        mobileRemoteStop: "Disconnect",
+        mobileRemoteRelay: "Relay address",
+        mobileRemotePin: "PIN",
+        mobileRemoteCode: "Pairing code",
+        mobileRemoteHint: "Scan the QR code in the Harness Remote app, or enter the pairing code and PIN manually.",
+        mobileRemoteWaiting: "Waiting for the Remote app to connect…",
+        mobileRemoteConnected: "Remote app connected.",
+        mobileRemoteNoApp: "No app connected yet.",
+        mobileRemoteGenerating: "Generating QR code…",
+        relayUnreachable: "Relay server unreachable. Check the relay address in Settings… and try again.",
+        relayNotConfigured: "Relay address not configured. Set it in Settings… first, then use Remote Connect.",
+        settings: "Settings…",
+        relayAddress: "Relay address (URL or IP:port)",
+        relayHint: "The remote app connects to this machine through this cloud relay. Used by Remote Connect.",
+        pairingPin: "Pairing PIN (6 digits)",
+        pairingPinHint: "Fixed pairing PIN shown in Remote Connect. Generated on first launch; change it here anytime."
     )
 
     static let chinese = MenuStrings(
         checkForUpdates: "检查更新…",
         quitFormat: "退出 %@",
+        about: "关于 DeepSeek Harness",
+        aboutVersion: "版本",
+        aboutEngine: "引擎（dsh web）",
+        aboutNode: "Node.js",
+        aboutNotInstalled: "未安装",
         edit: "编辑",
         undo: "撤销",
         redo: "重做",
@@ -100,7 +153,25 @@ struct MenuStrings {
         enterFullScreen: "进入全屏",
         exitFullScreen: "退出全屏",
         help: "帮助",
-        pluginsMarket: "插件市场…"
+        pluginsMarket: "插件市场…",
+        mobileRemote: "远程连接…",
+        mobileRemoteActive: "已连接。",
+        mobileRemoteStop: "断开",
+        mobileRemoteRelay: "中继地址",
+        mobileRemotePin: "PIN",
+        mobileRemoteCode: "配对码",
+        mobileRemoteHint: "在 Harness 远程 App 中扫描下方二维码；或手动输入配对码与 PIN。",
+        mobileRemoteWaiting: "等待远程 App 连接…",
+        mobileRemoteConnected: "远程 App 已连接。",
+        mobileRemoteNoApp: "尚未有 App 连接。",
+        mobileRemoteGenerating: "正在生成二维码…",
+        relayUnreachable: "中继服务器不可用。请检查「设置…」中的中继地址后重试。",
+        relayNotConfigured: "尚未配置中继地址。请先在「设置…」中填写中继地址，再使用远程连接。",
+        settings: "设置…",
+        relayAddress: "中继地址（URL 或 IP:端口）",
+        relayHint: "远程 App 通过该云端中继连接本机。保存后「远程连接」使用此地址。",
+        pairingPin: "配对 PIN（6 位数字）",
+        pairingPinHint: "「远程连接」中显示的固定配对 PIN。首次启动随机生成，可随时在此修改。"
     )
 
     static func forLanguage(_ language: AppLanguage) -> MenuStrings {
@@ -200,6 +271,7 @@ final class ServerManager {
     private let settings: Settings
     private var process: Process?
     private var probeTimer: Timer?
+    private var reusingInstance = false
 
     /// The port actually used this launch (may differ from `settings.port` if
     /// that port was taken, in which case a free port was chosen automatically).
@@ -215,6 +287,17 @@ final class ServerManager {
     /// Spawn the server process. Streams its output to the app's stdout so
     /// logs stay observable from a terminal launch.
     func start() {
+        // Reuse an already-running dsh instance on the preferred port (e.g. a
+        // leftover from a previous launch or started by the user) instead of
+        // spawning a second, empty instance — the remote app would connect to
+        // that new instance and see no sessions.
+        if looksLikeDshWeb(port: settings.port) {
+            activePort = settings.port
+            reusingInstance = true
+            process = nil
+            return
+        }
+
         // Choose a port that is actually free, falling back to automatic
         // selection when the configured one is occupied by another process.
         activePort = resolveFreePort(startingAt: settings.port)
@@ -280,7 +363,7 @@ final class ServerManager {
     }
 
     private func probe(deadline: Date, completion: @escaping () -> Void, failure: @escaping () -> Void) {
-        if self.process == nil {
+        if self.process == nil && !self.reusingInstance {
             // The child already exited before we could connect.
             failure()
             return
@@ -330,6 +413,27 @@ final class ServerManager {
         // Should never happen; fall back to the preferred port and let the
         // server's own startup error surface if it still fails.
         return preferred
+    }
+
+    /// True when `http://host:port/` serves a web page — treated as an
+    /// already-running dsh instance worth reusing.
+    private func looksLikeDshWeb(port: UInt16) -> Bool {
+        guard let url = URL(string: "http://\(settings.host):\(port)/") else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 1.5
+        let semaphore = DispatchSemaphore(value: 0)
+        var ok = false
+        URLSession.shared.dataTask(with: request) { _, resp, _ in
+            if let http = resp as? HTTPURLResponse,
+               http.statusCode == 200,
+               let type = http.allHeaderFields["Content-Type"] as? String,
+               type.contains("text/html") {
+                ok = true
+            }
+            semaphore.signal()
+        }.resume()
+        _ = semaphore.wait(timeout: .now() + 2)
+        return ok
     }
 
     /// Build the dsh web command for a specific port. If the configured command
@@ -448,6 +552,254 @@ final class ShortcutWebView: WKWebView {
             .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
         return "\"\(escaped)\""
     }
+}
+
+// MARK: - Mobile remote (bridge to the phone app)
+
+/// Spawns the mobile relay bridge (`mobile/bridge/bridge.mjs`) and surfaces
+/// pairing info (hostId / PIN) for the "Remote Connect" flow. The shell
+/// generates the pairing QR code itself (relay host + device ID); the bridge
+/// keeps running until stopped; stdout is line-delimited JSON.
+final class MobileRemoteManager {
+    struct Pairing {
+        let hostId: String
+        let hostToken: String
+        let pin: String
+        let pinExpiresAt: Int64
+    }
+
+    let nodePath: String
+    let bridgePath: URL
+    let relayURL: String
+    let deviceID: String
+    let dshPort: UInt16
+
+    private var process: Process?
+    private var stdoutBuffer = Data()
+    private(set) var isRunning = false
+    private var stopping = false
+    private var restartWork: DispatchWorkItem?
+    private var restartDelay = 2.0
+
+    /// Called on the main thread once the relay acknowledged registration.
+    var onRegistered: ((Pairing) -> Void)?
+    /// Called on the main thread when the bridge exits (incl. stop()).
+    var onExit: (() -> Void)?
+    /// When true, an unexpected bridge exit is followed by a delayed re-spawn
+    /// (exponential backoff) so the host re-registers with the relay — used
+    /// while the Remote Connect toggle is on.
+    var autoRestart = false
+
+    init(nodePath: String, bridgePath: URL, relayURL: String, deviceID: String, dshPort: UInt16) {
+        self.nodePath = nodePath
+        self.bridgePath = bridgePath
+        self.relayURL = relayURL
+        self.deviceID = deviceID
+        self.dshPort = dshPort
+    }
+
+    func start() {
+        guard !isRunning else { return }
+        restartDelay = 2.0
+        guard FileManager.default.isExecutableFile(atPath: nodePath),
+              FileManager.default.fileExists(atPath: bridgePath.path) else {
+            DispatchQueue.main.async { self.onExit?() }
+            return
+        }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: nodePath)
+        p.arguments = [bridgePath.path, "--relay", relayURL, "--dsh-port", "\(dshPort)",
+                       "--device-id", deviceID, "--pin", StablePairingPin()]
+        p.standardOutput = Pipe()
+        p.standardError = FileHandle.nullDevice
+        let pipe = p.standardOutput as! Pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard data.count > 0 else { return }
+            self?.consume(data)
+        }
+        p.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isRunning = false
+                self.onExit?()
+                // Unexpected exit while auto-restart is armed: re-register
+                // with the relay after a short backoff.
+                if self.autoRestart && !self.stopping {
+                    self.scheduleRestart()
+                }
+            }
+        }
+        process = p
+        isRunning = true
+        do {
+            try p.run()
+        } catch {
+            isRunning = false
+            DispatchQueue.main.async { self.onExit?() }
+        }
+    }
+
+    func stop() {
+        stopping = true
+        restartWork?.cancel()
+        restartWork = nil
+        guard let p = process, p.isRunning else { return }
+        p.terminate()
+    }
+
+    /// Re-spawn the bridge after a growing delay (2s → 30s cap) so an
+    /// intermittent failure doesn't hammer the relay.
+    private func scheduleRestart() {
+        restartWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.autoRestart, !self.stopping else { return }
+            self.start()
+        }
+        restartWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + restartDelay, execute: work)
+        restartDelay = min(restartDelay * 2, 30)
+    }
+
+    /// Read handler runs on a background thread; parse whole lines and bounce
+    /// recognized events to the main thread.
+    private func consume(_ data: Data) {
+        stdoutBuffer.append(data)
+        while let nl = stdoutBuffer.firstIndex(of: 0x0A) {
+            let line = stdoutBuffer[..<nl]
+            stdoutBuffer.removeSubrange(...nl)
+            guard let text = String(data: line, encoding: .utf8)?.trimmingCharacters(in: .whitespaces),
+                  !text.isEmpty,
+                  let json = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else {
+                continue
+            }
+            DispatchQueue.main.async { [weak self] in self?.handleEvent(json) }
+        }
+    }
+
+    private func handleEvent(_ json: [String: Any]) {
+        switch json["event"] as? String {
+        case "registered":
+            guard let hostId = json["hostId"] as? String,
+                  let hostToken = json["hostToken"] as? String,
+                  let pin = json["pin"] as? String else { return }
+            onRegistered?(Pairing(
+                hostId: hostId,
+                hostToken: hostToken,
+                pin: pin,
+                pinExpiresAt: (json["pinExpiresAt"] as? NSNumber)?.int64Value ?? 0
+            ))
+        case "online":
+            break // bridge reconnected; pairing window already shown
+        case "offline":
+            break
+        default:
+            break
+        }
+    }
+}
+
+// MARK: - Device ID + pairing QR (shell-generated)
+
+/// Stable pairing PIN: generated randomly on first launch, then kept in
+/// UserDefaults until the user changes it in Settings…
+func StablePairingPin() -> String {
+    let key = "mobilePairingPin"
+    if let existing = UserDefaults.standard.string(forKey: key),
+       existing.count == 6, existing.allSatisfy({ $0.isNumber }) {
+        return existing
+    }
+    let pin = String((0..<6).map { _ in "0123456789".randomElement()! })
+    UserDefaults.standard.set(pin, forKey: key)
+    return pin
+}
+
+/// 13-digit random device ID derived from device info (hostname + hardware
+/// UUID), stable across launches so reconnects reuse the same host identity.
+func DeviceID() -> String {
+    var seed = Host.current().localizedName ?? "unknown"
+    // Hardware UUID (macOS): IOPlatformUUID via IOKit.
+    let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+    if service != 0 {
+        if let uuid = IORegistryEntryCreateCFProperty(service, "IOPlatformUUID" as CFString,
+                                                      kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
+            seed += "|" + uuid
+        }
+        IOObjectRelease(service)
+    }
+    var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    seed.withCString { buf in
+        CC_SHA256(buf, CC_LONG(seed.utf8.count), &digest)
+    }
+    // First 8 bytes -> UInt64 -> mod 10^13 (13-digit, zero padded).
+    var value: UInt64 = 0
+    for i in 0..<8 { value = (value << 8) | UInt64(digest[i]) }
+    return String(format: "%013llu", value % 10_000_000_000_000)
+}
+
+/// The pairing QR content: relay host + device ID, plus the relay's own
+/// scheme (http for plaintext test relays, https otherwise) so the phone
+/// connects with a matching protocol. `lanAddress` (e.g. "192.168.1.5:3080")
+/// lets the phone prefer a direct LAN connection to this desktop's dsh web
+/// and only fall back to the cloud relay when it can't reach it.
+func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?) -> String {
+    var host = relayURL
+    var scheme = "https"
+    if let url = URL(string: relayURL) {
+        scheme = url.scheme ?? "https"
+        host = url.host ?? ""
+        if let port = url.port { host += ":\(port)" }
+    }
+    var qr = "relay://\(host)/pair?device=\(deviceID)&scheme=\(scheme)"
+    if let lan = lanAddress { qr += "&lan=\(lan)" }
+    return qr
+}
+
+/// First non-loopback IPv4 address in a private range (LAN direct connect).
+func LocalLANAddress() -> String? {
+    var address: String?
+    var ifaddr: UnsafeMutablePointer<ifaddrs>?
+    guard getifaddrs(&ifaddr) == 0 else { return nil }
+    defer { freeifaddrs(ifaddr) }
+    var cursor = ifaddr
+    while let ptr = cursor {
+        let interface = ptr.pointee
+        if interface.ifa_addr != nil && interface.ifa_addr.pointee.sa_family == UInt8(AF_INET) {
+            let flags = Int32(interface.ifa_flags)
+            let upAndNotLoopback = (flags & IFF_UP) != 0 && (flags & IFF_LOOPBACK) == 0
+            if upAndNotLoopback {
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                let saLen = socklen_t(interface.ifa_addr.pointee.sa_len)
+                if getnameinfo(interface.ifa_addr, saLen, &host, socklen_t(host.count),
+                               nil, 0, NI_NUMERICHOST) == 0 {
+                    let ip = String(cString: host)
+                    // Prefer the common private ranges; 192.168.* first.
+                    if ip.hasPrefix("192.168.") { address = ip; break }
+                    if ip.hasPrefix("10.") || ip.hasPrefix("172.") { address = ip }
+                }
+            }
+        }
+        cursor = ptr.pointee.ifa_next
+    }
+    return address
+}
+
+/// Renders a QR code as PNG data using CoreImage (CIQRCodeGenerator).
+func GenerateQRPNG(content: String) -> Data? {
+    guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+    let data = Data(content.utf8)
+    filter.setValue(data, forKey: "inputMessage")
+    filter.setValue("M", forKey: "inputCorrectionLevel")
+    guard let output = filter.outputImage else { return nil }
+    // Scale up so the QR is crisp when displayed at 240pt.
+    let scaled = output.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+    let rep = NSCIImageRep(ciImage: scaled)
+    let image = NSImage(size: rep.size)
+    image.addRepresentation(rep)
+    guard let tiff = image.tiffRepresentation,
+          let bitmap = NSBitmapImageRep(data: tiff),
+          let png = bitmap.representation(using: .png, properties: [:]) else { return nil }
+    return png
 }
 
 // MARK: - Node.js runtime provisioning
@@ -610,6 +962,27 @@ final class NodeRuntimeManager: NSObject {
     static func binDirectoryFromNodePath() -> String? {
         guard let node = nodePath() else { return nil }
         return (node as NSString).deletingLastPathComponent
+    }
+
+    /// `node --version` output (e.g. "v24.10.0"), or nil if node is missing.
+    static func nodeVersion() -> String? {
+        guard let node = nodePath() else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: node)
+        process.arguments = ["--version"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let version = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (process.terminationStatus == 0 && !(version?.isEmpty ?? true)) ? version : nil
     }
 
     private static func findExecutable(named name: String) -> String? {
@@ -889,7 +1262,7 @@ final class DSHUpdateManager {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler, NSWindowDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private let settings: Settings
@@ -909,6 +1282,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var loadingOverlay: NSView?
     private let updateManager = DSHUpdateManager()
     private var updateCheckInFlight = false
+    private var mobileRemote: MobileRemoteManager?
+    private var relayPanel: NSPanel?
+    private var relayField: NSTextField?
+    private var relayPinField: NSTextField?
+    private var remoteSwitchRef: NSSwitch?
+    private var remoteInfoView: NSStackView?
+    private var remoteQrView: NSImageView?
+    private var remotePinLabel: NSTextField?
+    private var remoteCodeLabel: NSTextField?
+    private var remoteRelayLabel: NSTextField?
+    private var remoteStatusLabel: NSTextField?
+    private var remotePollTimer: Timer?
+    private var lastPairing: MobileRemoteManager.Pairing?
+    private var lastQrPNG: Data?
 
     // MARK: Theme & language preferences (persisted in UserDefaults)
 
@@ -1173,6 +1560,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 DispatchQueue.main.async {
                     self?.loadUI()
                     self?.autoCheckForUpdates()
+                    // Auto-start the remote bridge when the toggle was left on.
+                    if UserDefaults.standard.bool(forKey: "mobileRemoteEnabled") {
+                        self?.startMobileBridge(silent: true)
+                    }
                 }
             }, failure: { [weak self] in
                 DispatchQueue.main.async {
@@ -1330,6 +1721,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let appMenu = NSMenu()
         let appName = ProcessInfo.processInfo.processName
         appMenu.addItem(
+            withTitle: s.about,
+            action: #selector(showAbout(_:)),
+            keyEquivalent: ""
+        )
+        appMenu.addItem(.separator())
+        appMenu.addItem(
             withTitle: s.checkForUpdates,
             action: #selector(checkForUpdates(_:)),
             keyEquivalent: ""
@@ -1419,6 +1816,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         fullScreenItem.keyEquivalentModifierMask = [.control, .command]
         viewMenu.addItem(fullScreenItem)
 
+        // Remote Connect now lives inside Settings… (toggle + QR + PIN).
+        viewMenu.addItem(.separator())
+        viewMenu.addItem(
+            withTitle: s.settings,
+            action: #selector(openSettings(_:)),
+            keyEquivalent: ""
+        )
+
         viewMenuItem.submenu = viewMenu
 
         // Help menu (external links / documentation).
@@ -1448,6 +1853,369 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         openInDefaultBrowser(url)
     }
 
+    // MARK: - Settings
+
+    /// Menu action: open Settings… — now hosts the Remote Connect toggle,
+    /// pairing info and QR code inline (no separate pairing window).
+    @objc private func openSettings(_ sender: Any?) {
+        let s = uiStrings
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 0),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = s.settings
+        panel.isReleasedWhenClosed = false
+        panel.center()
+
+        // Field label.
+        let fieldLabel = NSTextField(labelWithString: s.relayAddress)
+        fieldLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+
+        // Address input.
+        let field = NSTextField(string: UserDefaults.standard.string(forKey: "mobileRelayURL") ?? "https://")
+        field.placeholderString = "relay.example.com:8443"
+        field.font = NSFont.systemFont(ofSize: 13)
+        field.focusRingType = .default
+
+        // Hint (wrapping, dimmer).
+        let hint = NSTextField(wrappingLabelWithString: s.relayHint)
+        hint.font = NSFont.systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        hint.preferredMaxLayoutWidth = 388
+
+        // Pairing PIN — stable, editable.
+        let pinLabel = NSTextField(labelWithString: s.pairingPin)
+        pinLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        let pinField = NSTextField(string: StablePairingPin())
+        pinField.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
+        pinField.focusRingType = .default
+
+        // PIN hint (dimmer).
+        let pinHint = NSTextField(wrappingLabelWithString: s.pairingPinHint)
+        pinHint.font = NSFont.systemFont(ofSize: 11)
+        pinHint.textColor = .secondaryLabelColor
+        pinHint.preferredMaxLayoutWidth = 388
+
+        // Separator before the Remote Connect section.
+        let divider = NSBox()
+        divider.boxType = .separator
+
+        // Remote Connect toggle row.
+        let remoteTitle = NSTextField(labelWithString: s.mobileRemote)
+        remoteTitle.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        let remoteSwitch = NSSwitch()
+        remoteSwitch.target = self
+        remoteSwitch.action = #selector(remoteToggleChanged(_:))
+        // Restore the persisted toggle state (the bridge may not be running
+        // yet right after launch even though the toggle is on).
+        remoteSwitch.state = UserDefaults.standard.bool(forKey: "mobileRemoteEnabled") ? .on : .off
+        let remoteRow = NSStackView(views: [remoteTitle, remoteSwitch])
+        remoteRow.orientation = .horizontal
+        remoteRow.spacing = 8
+
+        // Connection info area (QR + PIN + code + status) — hidden until on.
+        let qrView = NSImageView()
+        qrView.imageScaling = .scaleProportionallyUpOrDown
+        let infoPin = NSTextField(labelWithString: "")
+        infoPin.font = NSFont.monospacedDigitSystemFont(ofSize: 28, weight: .bold)
+        infoPin.alignment = .center
+        let infoCode = NSTextField(labelWithString: "")
+        infoCode.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        infoCode.alignment = .center
+        infoCode.isSelectable = true
+        let infoRelay = NSTextField(labelWithString: "")
+        infoRelay.font = NSFont.systemFont(ofSize: 11)
+        infoRelay.textColor = .secondaryLabelColor
+        infoRelay.alignment = .center
+        let infoStatus = NSTextField(labelWithString: s.mobileRemoteWaiting)
+        infoStatus.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        infoStatus.alignment = .center
+        infoStatus.lineBreakMode = .byTruncatingTail
+        let infoView = NSStackView(views: [qrView, infoPin, infoCode, infoRelay, infoStatus])
+        infoView.orientation = .vertical
+        infoView.alignment = .width
+        infoView.spacing = 8
+        infoView.isHidden = !(mobileRemote?.isRunning ?? false)
+
+        // Buttons: Cancel | OK (trailing).
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelRelaySettings(_:)))
+        let save = NSButton(title: "OK", target: self, action: #selector(saveRelaySettings(_:)))
+        save.keyEquivalent = "\r"
+        let buttons = NSStackView(views: [cancel, save])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        buttons.alignment = .trailing
+
+        let stack = NSStackView(views: [fieldLabel, field, hint, pinLabel, pinField, pinHint,
+                                        divider, remoteRow, infoView, buttons])
+        stack.orientation = .vertical
+        stack.alignment = .width   // children fill the panel width
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        NSLayoutConstraint.activate([
+            stack.widthAnchor.constraint(equalToConstant: 420),
+            field.heightAnchor.constraint(equalToConstant: 24),
+            hint.widthAnchor.constraint(equalToConstant: 388),
+            qrView.widthAnchor.constraint(equalToConstant: 240),
+            qrView.heightAnchor.constraint(equalToConstant: 240),
+            qrView.centerXAnchor.constraint(equalTo: stack.centerXAnchor),
+        ])
+
+        panel.contentView = stack
+        panel.delegate = self
+        panel.makeKeyAndOrderFront(nil)
+        relayPanel = panel
+        relayField = field
+        relayPinField = pinField
+        remoteSwitchRef = remoteSwitch
+        remoteInfoView = infoView
+        remoteQrView = qrView
+        remotePinLabel = infoPin
+        remoteCodeLabel = infoCode
+        remoteRelayLabel = infoRelay
+        remoteStatusLabel = infoStatus
+
+        // If the bridge is already running, repopulate its info and polling.
+        if let pairing = lastPairing, let qr = lastQrPNG {
+            fillRemoteInfo(pairing, qrPNG: qr, deviceID: DeviceID())
+            startRemotePolling(hostToken: pairing.hostToken)
+        }
+        NSApp.runModal(for: panel)
+        remotePollTimer?.invalidate()
+        remotePollTimer = nil
+    }
+
+    /// The settings panel is `.closable`; closing via the window button must
+    /// also end the modal session, otherwise the app gets stuck in the
+    /// runModal loop (menu misbehaves, app can't quit).
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender === relayPanel {
+            remotePollTimer?.invalidate()
+            remotePollTimer = nil
+            NSApp.stopModal()
+        }
+        return true
+    }
+
+    @objc private func saveRelaySettings(_ sender: Any?) {
+        guard let panel = relayPanel else { return }
+        let oldRelay = UserDefaults.standard.string(forKey: "mobileRelayURL")
+        let oldPin = UserDefaults.standard.string(forKey: "mobilePairingPin")
+        var relayChanged = false
+        var pinChanged = false
+        let raw = (relayField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !raw.isEmpty {
+            var relay = raw
+            if !relay.lowercased().hasPrefix("http://"), !relay.lowercased().hasPrefix("https://") {
+                // Loopback addresses usually run a plain-HTTP test relay;
+                // anything else defaults to HTTPS.
+                relay = (isLoopbackHost(relay) ? "http://" : "https://") + relay
+            }
+            UserDefaults.standard.set(relay, forKey: "mobileRelayURL")
+            relayChanged = relay != oldRelay
+        }
+        // Save the pairing PIN when it is a valid 6-digit number.
+        if let pinText = relayPinField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+           pinText.count == 6, pinText.allSatisfy({ $0.isNumber }) {
+            UserDefaults.standard.set(pinText, forKey: "mobilePairingPin")
+            pinChanged = pinText != oldPin
+        }
+        // If the relay address or PIN changed while the bridge is running,
+        // restart it so it re-registers with the new values — otherwise the
+        // pairing info would be stale and pairing would fail.
+        if (relayChanged || pinChanged), mobileRemote?.isRunning == true {
+            mobileRemote?.stop()
+            mobileRemote = nil
+            lastPairing = nil
+            lastQrPNG = nil
+            remotePollTimer?.invalidate()
+            remotePollTimer = nil
+            startMobileBridge()
+        }
+        NSApp.stopModal()
+        panel.orderOut(nil)
+    }
+
+    /// True for localhost / 127.x / ::1 — where a plain-HTTP relay is expected
+    /// during testing.
+    private func isLoopbackHost(_ hostOrAddr: String) -> Bool {
+        let h = hostOrAddr.lowercased()
+        return h == "localhost" || h == "::1" || h.hasPrefix("127.")
+    }
+
+    @objc private func cancelRelaySettings(_ sender: Any?) {
+        NSApp.stopModal()
+        relayPanel?.orderOut(nil)
+    }
+
+    // MARK: - Mobile remote
+
+    /// Settings panel toggle: start/stop the relay bridge. The state is
+    /// persisted so the bridge auto-starts on the next launch.
+    @objc private func remoteToggleChanged(_ sender: Any?) {
+        if (remoteSwitchRef?.state ?? .off) == .on {
+            UserDefaults.standard.set(true, forKey: "mobileRemoteEnabled")
+            startMobileBridge()
+        } else {
+            UserDefaults.standard.set(false, forKey: "mobileRemoteEnabled")
+            stopMobileBridge()
+            remoteInfoView?.isHidden = true
+        }
+    }
+
+    /// Start the bridge (from the Settings toggle, config changes, or app
+    /// launch when the toggle is on) and surface pairing info + QR inline in
+    /// the settings panel. `silent` suppresses error alerts (app-launch path).
+    private func startMobileBridge(silent: Bool = false) {
+        if let m = mobileRemote, m.isRunning { return }
+        let s = uiStrings
+
+        // Relay address comes from Settings… (mobileRelayURL).
+        let relay = UserDefaults.standard.string(forKey: "mobileRelayURL") ?? ""
+        guard !relay.isEmpty else {
+            if !silent {
+                let alert = NSAlert()
+                alert.messageText = s.mobileRemote
+                alert.informativeText = s.relayNotConfigured
+                alert.runModal()
+            }
+            remoteSwitchRef?.state = .off
+            return
+        }
+        guard let node = NodeRuntimeManager.nodePath() else {
+            if !silent {
+                let err = NSAlert()
+                err.messageText = s.mobileRemote
+                err.informativeText = "Node.js is required to run the mobile bridge."
+                err.runModal()
+            }
+            remoteSwitchRef?.state = .off
+            return
+        }
+        guard let bridge = Bundle.main.resourceURL?.appendingPathComponent("bridge/bridge.mjs") else {
+            remoteSwitchRef?.state = .off
+            return
+        }
+
+        // Shell-generated identity + pairing QR (relay host + device ID, plus
+        // the LAN address of the bridge's direct-connect proxy so the phone
+        // can prefer a direct connection and fall back to the relay).
+        let deviceID = DeviceID()
+        let lan = LocalLANAddress().map { "\($0):13080" }
+        let qrContent = PairingQRContent(relayURL: relay, deviceID: deviceID, lanAddress: lan)
+        guard let qrPNG = GenerateQRPNG(content: qrContent) else {
+            if !silent {
+                let err = NSAlert()
+                err.messageText = s.mobileRemote
+                err.informativeText = "Failed to generate the pairing QR code."
+                err.runModal()
+            }
+            remoteSwitchRef?.state = .off
+            return
+        }
+
+        let m = MobileRemoteManager(nodePath: node, bridgePath: bridge,
+                                    relayURL: relay, deviceID: deviceID,
+                                    dshPort: server.activePort)
+        // While the toggle is on, an unexpected bridge exit re-spawns and
+        // re-registers with the relay automatically.
+        m.autoRestart = true
+        mobileRemote = m
+
+        // Registration must succeed within 12s or the relay is unreachable.
+        var registered = false
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self = self, !registered else { return }
+            self.mobileRemote?.stop()
+            self.mobileRemote = nil
+            self.lastPairing = nil
+            self.lastQrPNG = nil
+            if !silent {
+                self.remoteSwitchRef?.state = .off
+                self.remoteInfoView?.isHidden = true
+                let err = NSAlert()
+                err.messageText = self.uiStrings.mobileRemote
+                err.informativeText = self.uiStrings.relayUnreachable
+                err.runModal()
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: timeout)
+        m.onRegistered = { [weak self] pairing in
+            registered = true
+            timeout.cancel()
+            self?.lastPairing = pairing
+            self?.lastQrPNG = qrPNG
+            // Only populate the inline info when the settings panel is open.
+            if self?.relayPanel != nil {
+                self?.fillRemoteInfo(pairing, qrPNG: qrPNG, deviceID: deviceID)
+                self?.startRemotePolling(hostToken: pairing.hostToken)
+            }
+        }
+        m.start()
+    }
+
+    private func stopMobileBridge() {
+        mobileRemote?.stop()
+        mobileRemote = nil
+        remotePollTimer?.invalidate()
+        remotePollTimer = nil
+        lastPairing = nil
+        lastQrPNG = nil
+    }
+
+    /// Fill the settings-panel connection info area (QR + PIN + code + status).
+    private func fillRemoteInfo(_ pairing: MobileRemoteManager.Pairing, qrPNG: Data, deviceID: String) {
+        let s = uiStrings
+        remoteInfoView?.isHidden = false
+        remoteQrView?.image = NSImage(data: qrPNG)
+        remotePinLabel?.stringValue = "\(s.mobileRemotePin): \(pairing.pin)"
+        remoteCodeLabel?.stringValue = "\(s.mobileRemoteCode): \(deviceID)"
+        remoteRelayLabel?.stringValue = "\(s.mobileRemoteRelay): \(mobileRemote?.relayURL ?? "")"
+        remoteStatusLabel?.stringValue = s.mobileRemoteWaiting
+        remoteStatusLabel?.textColor = .systemOrange
+    }
+
+    /// Poll the relay for connected devices every 2s while the settings panel
+    /// is open — the connection state is queried, not guessed.
+    private func startRemotePolling(hostToken: String) {
+        remotePollTimer?.invalidate()
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.pollRemoteDevices(hostToken: hostToken)
+        }
+        remotePollTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        pollRemoteDevices(hostToken: hostToken)
+    }
+
+    private func pollRemoteDevices(hostToken: String) {
+        guard let relay = mobileRemote?.relayURL, let url = URL(string: "\(relay)/relay/v1/host/devices") else { return }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(hostToken)", forHTTPHeaderField: "Authorization")
+        request.timeoutInterval = 5
+        URLSession.shared.dataTask(with: request) { [weak self] data, resp, err in
+            guard let self = self, let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let devices = json["devices"] as? [[String: Any]] else { return }
+            let online = devices.contains { ($0["online"] as? Bool) ?? false }
+            let count = devices.count
+            DispatchQueue.main.async {
+                let s = self.uiStrings
+                if online {
+                    self.remoteStatusLabel?.stringValue = s.mobileRemoteConnected
+                    self.remoteStatusLabel?.textColor = .systemGreen
+                } else {
+                    self.remoteStatusLabel?.stringValue = count == 0 ? s.mobileRemoteWaiting : s.mobileRemoteNoApp
+                    self.remoteStatusLabel?.textColor = .systemOrange
+                }
+            }
+        }.resume()
+    }
+
     /// Called once on launch (in the background) to check for a newer dsh
     /// version without blocking startup.
     private func autoCheckForUpdates() {
@@ -1463,6 +2231,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     /// Menu action: manually check for updates.
+    @objc private func showAbout(_ sender: Any?) {
+        let s = uiStrings
+        let appName = ProcessInfo.processInfo.processName
+        let bundle = Bundle.main
+        let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        let engine = updateManager.localVersion ?? s.aboutNotInstalled
+        let node = NodeRuntimeManager.nodeVersion() ?? s.aboutNotInstalled
+
+        let alert = NSAlert()
+        alert.messageText = appName
+        alert.informativeText = """
+        \(s.aboutVersion): \(version)\(build.isEmpty ? "" : " (\(build))")
+        \(s.aboutEngine): \(engine)
+        \(s.aboutNode): \(node)
+        """
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     @objc private func checkForUpdates(_ sender: Any?) {
         guard !updateCheckInFlight else { return }
         updateCheckInFlight = true

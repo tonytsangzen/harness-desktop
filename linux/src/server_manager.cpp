@@ -5,6 +5,7 @@
 #include "util.h"
 
 #include <gio/gio.h>
+#include <libsoup/soup.h>
 
 #include <csignal>
 #include <cstdio>
@@ -60,10 +61,32 @@ bool TcpProbe(const std::string& host, unsigned short port, int timeoutMs) {
     return ok;
 }
 
+// True when the port already serves a web page (treated as an existing dsh
+// instance worth reusing). Uses a plain HTTP GET with a short timeout.
+bool LooksLikeDshWeb(const std::string& host, unsigned short port) {
+    std::string url = "http://" + host + ":" + std::to_string(port) + "/";
+    SoupSession* session = soup_session_new();
+    SoupMessage* msg = soup_message_new("GET", url.c_str());
+    guint status = soup_session_send_message(session, msg);
+    const char* ctype = msg->response_headers
+                            ? soup_message_headers_get_content_type(msg->response_headers)
+                            : nullptr;
+    bool ok = status == 200 && ctype && g_strrstr(ctype, "text/html") != nullptr;
+    g_object_unref(msg);
+    g_object_unref(session);
+    return ok;
+}
+
 unsigned short ResolvePort(const Settings& settings) {
     // Prefer the configured port when free; otherwise walk up (never kill an
-    // existing process — matching the macOS/Windows behavior).
+    // existing process — matching the macOS/Windows behavior). When the
+    // configured port is busy AND already serves a web page, treat it as an
+    // existing dsh instance and reuse it (the remote app then sees its
+    // sessions instead of an empty new instance).
     unsigned short port = settings.port;
+    if (TcpProbe(settings.host, port, 300) && LooksLikeDshWeb(settings.host, port)) {
+        return port;
+    }
     for (int tries = 0; tries < 100; ++tries, ++port) {
         if (port == 0) port = 1024;
         if (!TcpProbe(settings.host, port, 300)) return port;
@@ -102,6 +125,12 @@ bool Start() {
     }
 
     g_activePort = ResolvePort(*g_settings);
+
+    // Reusing an existing instance on the configured port: nothing to spawn.
+    if (TcpProbe(g_settings->host, g_activePort, 300)) {
+        g_running = true;
+        return true;
+    }
 
     std::vector<std::string> cmd;
     if (g_settings->customCommand) {

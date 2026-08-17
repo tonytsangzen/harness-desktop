@@ -88,16 +88,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure (VS generator, ${{ matrix.arch }})
-        shell: pwsh
-        run: |
-          cmake -S windows -B windows/build-${{ matrix.name }} `
-            -G "Visual Studio 17 2022" -A ${{ matrix.arch }}
-
-      - name: Build Release
-        shell: pwsh
-        run: cmake --build windows/build-${{ matrix.name }} --config Release
-
       - name: Resolve version (from tag or default)
         id: version
         shell: pwsh
@@ -107,12 +97,43 @@ jobs:
           if (-not $v) { $v = '1.0.0' }
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$v"
 
+      - name: Configure (VS generator, ${{ matrix.arch }})
+        shell: pwsh
+        run: |
+          cmake -S windows -B windows/build-${{ matrix.name }} `
+            -G "Visual Studio 17 2022" -A ${{ matrix.arch }} `
+            -DAPP_VERSION=${{ steps.version.outputs.version }}
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build windows/build-${{ matrix.name }} --config Release
+
       - name: Stage portable exe
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force staging | Out-Null
           Copy-Item "windows/build-${{ matrix.name }}/Release/DSHWebView.exe" `
             "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}.exe"
+
+      - name: Stage portable zip (exe + mobile bridge)
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse mobile/bridge staging/bridge
+          Remove-Item staging/bridge/package-lock.json -ErrorAction SilentlyContinue
+          Copy-Item "windows/build-${{ matrix.name }}/Release/DSHWebView.exe" `
+            "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}-portable.zip"
+          Compress-Archive -Path "staging/DSHWebView.exe","staging/bridge" `
+            -DestinationPath "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}-portable.zip" `
+            -Force
+          Remove-Item staging/DSHWebView.exe -Force
+
+      - name: Harvest mobile bridge into WiX fragment
+        shell: pwsh
+        run: |
+          & "$PWD/wix/heat.exe" dir mobile/bridge `
+            -cg BridgeComponents -gg -scom -sfrag -template:fragment `
+            -dr INSTALLFOLDER -var var.BridgeDir -out bridge.wxs
+          if ($LASTEXITCODE -ne 0) { throw "heat failed" }
 
       - name: Build MSI installer (WiX v3)
         shell: pwsh
@@ -129,14 +150,17 @@ jobs:
             "-dPlatform=x64" `
             "-dExePath=$exe" `
             "-dIconPath=$icon" `
-            windows/installer/DSHWebView.wxs
+            "-dBridgeDir=${{ github.workspace }}/mobile/bridge" `
+            windows/installer/DSHWebView.wxs `
+            bridge.wxs
           if ($LASTEXITCODE -ne 0) { throw "candle failed" }
           # Write the WiX debug symbols (.wixpdb) outside staging so it never
           # ends up in the uploaded/released assets.
           & "$PWD/wix/light.exe" -nologo `
             -o "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}.msi" `
             -pdbout "DSHWebView-${{ matrix.name }}.wixpdb" `
-            DSHWebView.wixobj
+            DSHWebView.wixobj `
+            bridge.wixobj
           if ($LASTEXITCODE -ne 0) { throw "light failed" }
 
       - name: Upload artifacts
@@ -146,6 +170,7 @@ jobs:
           path: |
             staging/*.exe
             staging/*.msi
+            staging/*.zip
           if-no-files-found: error
 
   linux:
@@ -194,14 +219,23 @@ jobs:
               libwebkit2gtk-4.1-dev:arm64 libgtk-3-dev:arm64 libsoup-3.0-dev:arm64
           fi
 
+      - name: Resolve version (from tag or default)
+        id: version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          if [ -z "$v" ]; then v='1.0.0'; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
       - name: Configure (Ninja, Release)
         run: |
           if [ "${{ matrix.cross }}" = "true" ]; then
             PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig \
             cmake -S linux -B linux/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/linux/cmake/toolchain-aarch64.cmake"
+              -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/linux/cmake/toolchain-aarch64.cmake" \
+              -DAPP_VERSION=${{ steps.version.outputs.version }}
           else
-            cmake -S linux -B linux/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+            cmake -S linux -B linux/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+              -DAPP_VERSION=${{ steps.version.outputs.version }}
           fi
 
       - name: Build
@@ -209,13 +243,6 @@ jobs:
 
       - name: Verify architecture
         run: file linux/build/dshwebview
-
-      - name: Resolve version (from tag or default)
-        id: version
-        run: |
-          v="${GITHUB_REF_NAME#v}"
-          if [ -z "$v" ]; then v='1.0.0'; fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Stage portable tarball
         run: |
@@ -226,6 +253,8 @@ jobs:
           cp linux/resources/deepseek-harness.svg "$dir/"
           cp linux/resources/deepseek-harness.png "$dir/"
           cp linux/resources/deepseek-harness.desktop "$dir/"
+          cp -R mobile/bridge "$dir/bridge"
+          rm -f "$dir/bridge/package-lock.json"
           printf '%s\n' \
             'DeepSeek Harness - Linux (${{ matrix.tarname }})' \
             '' \

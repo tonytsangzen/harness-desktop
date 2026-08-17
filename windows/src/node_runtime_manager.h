@@ -24,6 +24,9 @@ std::wstring NodePath();
 std::wstring NpxPath();
 std::wstring BinDirectoryFromNodePath();
 
+// `node --version` output (e.g. "v22.14.0"), or L"" when node is missing.
+std::wstring NodeVersion();
+
 // Mainland China uses npmmirror for both the node binary and the npm registry.
 bool IsMainlandChinaTimeZone();
 std::wstring DistBase();

@@ -38,5 +38,8 @@ std::string NpmRegistryUrl();
 // onState may be called from a worker thread; returns RuntimeAvailable().
 bool Provide(const ProgressFn& onState);
 
+// `node --version` output (e.g. "v22.14.0"), or "" when node is missing.
+std::string NodeVersion();
+
 } // namespace NodeRuntimeManager
 } // namespace dsh

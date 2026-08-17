@@ -85,6 +85,23 @@ private:
     void RefreshAndRestart();
     static gpointer CheckForUpdatesThread(gpointer userData);
 
+    // ---- mobile remote (relay bridge) ----
+    void OnMobileRemoteActivate();
+    void StartMobileBridge(const std::string& relay, const std::string& deviceId);
+    void StopMobileBridge();
+    void ShowPairingDialog(const std::string& pin, const std::string& deviceId,
+                           const std::string& qrPNG);
+    static gboolean OnBridgeOutput(GIOChannel* channel, GIOCondition cond, gpointer userData);
+    static void OnBridgeExit(GPid pid, gint status, gpointer userData);
+    GPid bridgePid_ = 0;
+    GtkWidget* pairingDialog_ = nullptr;
+    std::string bridgeBuffer_; // bridge stdout line accumulation
+    std::string mobileRelayUrl_;
+    std::string deviceId_;
+    std::string qrPNG_;
+    bool registered_ = false;
+    guint registerTimeoutId_ = 0;
+
     // ---- WebKit callbacks ----
     static void OnDecidePolicy(WebKitWebView* webView, WebKitPolicyDecision* decision,
                                WebKitPolicyDecisionType type, gpointer userData);
@@ -105,6 +122,8 @@ private:
     static void OnLangToggled(GtkWidget* item, gpointer userData);
     static void OnFullScreenToggled(GtkWidget* item, gpointer userData);
     static void OnPluginsMarketActivate(GtkWidget* item, gpointer userData);
+    static void OnSettingsActivate(GtkWidget* item, gpointer userData);
+    static void OnAboutActivate(GtkWidget* item, gpointer userData);
     static void OnEditActivate(GtkWidget* item, gpointer userData);
 };
 
