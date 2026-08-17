@@ -1,3 +1,10 @@
+## [1.1.2] - 2026-08-17
+
+### 修复
+
+- **CI 构建全绿**：修复 Linux（libsoup3 API、静态回调、lambda 捕获、qrcodegen C 语言启用、deb control 缩进）与 Windows（winsock 头序、namespace 限定、对话框模板类型、WiX heat/ICE80）的全部编译与打包错误，macOS / Linux（x64+arm64）/ Windows（x64+arm64）以及 Android / iOS 手机端产物均构建成功。
+- **iOS 产物打包**：修正 CI 中 Runner.app 的 zip 路径，iOS App 产物正常上传。
+
 ## [1.1.1] - 2026-08-17
 
 ### 新增

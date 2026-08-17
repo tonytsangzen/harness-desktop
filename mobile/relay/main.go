@@ -200,7 +200,7 @@ func main() {
 	mux.HandleFunc("/relay/v1/host", srv.handleHost)
 	mux.HandleFunc("/relay/v1/device", srv.handleDevice)
 
-	addr := ":8080"
+	addr := ":5678"
 	log.Printf("relay listening on %s (WSS only behind TLS reverse proxy)", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatal(err)
