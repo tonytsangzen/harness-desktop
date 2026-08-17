@@ -86,7 +86,7 @@ private:
     static gpointer CheckForUpdatesThread(gpointer userData);
 
     // ---- mobile remote (relay bridge) ----
-    void OnMobileRemoteActivate();
+    static void OnMobileRemoteActivate(GtkWidget* item, gpointer userData);
     void StartMobileBridge(const std::string& relay, const std::string& deviceId);
     void StopMobileBridge();
     void ShowPairingDialog(const std::string& pin, const std::string& deviceId,

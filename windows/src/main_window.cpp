@@ -21,6 +21,7 @@
 #include <webview2.h>
 #include <gdiplus.h>
 #include <wincrypt.h>
+#include <iphlpapi.h>
 
 #include <shlobj.h>
 #include <shobjidl.h>

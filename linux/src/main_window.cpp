@@ -41,6 +41,14 @@ namespace {
 
 constexpr const char* kSettingsFile = "settings.conf";
 
+// True for localhost / 127.x / ::1 — where a plain-HTTP relay is expected
+// during testing (scheme auto-completion uses this).
+bool IsLoopbackHost(const std::string& hostOrAddr) {
+    std::string h = hostOrAddr;
+    std::transform(h.begin(), h.end(), h.begin(), ::tolower);
+    return h == "localhost" || h == "::1" || h.rfind("127.", 0) == 0;
+}
+
 // Directory of the running executable (portable tarballs ship the icon next
 // to the binary).
 std::string ExeDir() {
@@ -927,7 +935,7 @@ void MainWindow::OnAboutActivate(GtkWidget* /*item*/, gpointer userData) {
     auto* self = static_cast<MainWindow*>(userData);
     bool zh = self->IsChinese();
 
-    std::string engine = LocalVersion();
+    std::string engine = UpdateManager::LocalVersion();
     if (engine.empty()) engine = zh ? "未安装" : "not installed";
     std::string node = NodeRuntimeManager::NodeVersion();
     if (node.empty()) node = zh ? "未安装" : "not installed";
@@ -1010,17 +1018,7 @@ void MainWindow::OnEditActivate(GtkWidget* item, gpointer userData) {
 
 namespace {
 
-// True for localhost / 127.x / ::1 — where a plain-HTTP relay is expected
-// during testing (scheme auto-completion uses this).
-bool IsLoopbackHost(const std::string& hostOrAddr) {
-    std::string h = hostOrAddr;
-    std::transform(h.begin(), h.end(), h.begin(), ::tolower);
-    return h == "localhost" || h == "::1" || h.rfind("127.", 0) == 0;
-}
-
 // 13-digit random device ID derived from device info (hostname + machine-id),
-// stable across launches so reconnects reuse the same host identity.
-std::string DeviceID() {
     std::string seed = g_get_host_name();
     if (g_file_test("/etc/machine-id", G_FILE_TEST_IS_REGULAR)) {
         gchar* contents = nullptr;
@@ -1069,8 +1067,8 @@ std::string LocalLANAddress() {
 // so reconnects reuse the same host identity (mirrors the macOS shell's PIN).
 std::string StablePairingPin() {
     std::string path = ConfigDir() + "/pin";
-    std::string existing;
-    if (ReadFileText(path, existing)) {
+    std::string existing = ReadFileText(path);
+    if (!existing.empty()) {
         existing.erase(existing.find_last_not_of(" \t\r\n") + 1);
         if (existing.size() == 6 &&
             existing.find_first_not_of("0123456789") == std::string::npos) {
@@ -1278,7 +1276,7 @@ void MainWindow::StartMobileBridge(const std::string& relay, const std::string& 
     bridgeBuffer_.clear();
     GIOChannel* ch = g_io_channel_unix_new(stdoutFd);
     g_io_channel_set_encoding(ch, nullptr, nullptr); // binary-safe
-    g_io_add_watch(ch, G_IO_IN | G_IO_HUP, OnBridgeOutput, this);
+    g_io_add_watch(ch, static_cast<GIOCondition>(G_IO_IN | G_IO_HUP), OnBridgeOutput, this);
     g_io_channel_unref(ch);
     g_child_watch_add(pid, OnBridgeExit, this);
 }

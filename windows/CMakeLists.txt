@@ -67,7 +67,7 @@ target_compile_definitions(DSHWebView PRIVATE APP_VERSION="${APP_VERSION}")
 
 target_link_libraries(DSHWebView PRIVATE
     "${WEBVIEW2_LIB}"
-    winhttp ws2_32 shell32 shlwapi ole32 oleaut32 comctl32 advapi32 version user32 gdi32 uuid crypt32 dwmapi gdiplus
+    winhttp ws2_32 shell32 shlwapi ole32 oleaut32 comctl32 advapi32 version user32 gdi32 uuid crypt32 dwmapi gdiplus iphlpapi
 )
 
 target_compile_options(DSHWebView PRIVATE /W3 /wd4996 /utf-8)

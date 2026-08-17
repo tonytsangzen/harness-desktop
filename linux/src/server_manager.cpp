@@ -63,15 +63,23 @@ bool TcpProbe(const std::string& host, unsigned short port, int timeoutMs) {
 
 // True when the port already serves a web page (treated as an existing dsh
 // instance worth reusing). Uses a plain HTTP GET with a short timeout.
+// libsoup3 dropped the synchronous soup_session_send_message, so this uses
+// the soup3 sync API (soup_session_send) and accessor functions.
 bool LooksLikeDshWeb(const std::string& host, unsigned short port) {
     std::string url = "http://" + host + ":" + std::to_string(port) + "/";
     SoupSession* session = soup_session_new();
     SoupMessage* msg = soup_message_new("GET", url.c_str());
-    guint status = soup_session_send_message(session, msg);
-    const char* ctype = msg->response_headers
-                            ? soup_message_headers_get_content_type(msg->response_headers)
-                            : nullptr;
-    bool ok = status == 200 && ctype && g_strrstr(ctype, "text/html") != nullptr;
+    GError* error = nullptr;
+    GInputStream* stream = soup_session_send(session, msg, nullptr, &error);
+    bool ok = false;
+    if (error == nullptr && stream != nullptr) {
+        guint status = soup_message_get_status(msg);
+        SoupMessageHeaders* hdrs = soup_message_get_response_headers(msg);
+        const char* ctype = hdrs ? soup_message_headers_get_content_type(hdrs) : nullptr;
+        ok = status == 200 && ctype && g_strrstr(ctype, "text/html") != nullptr;
+    }
+    if (stream) g_object_unref(stream);
+    if (error) g_error_free(error);
     g_object_unref(msg);
     g_object_unref(session);
     return ok;
