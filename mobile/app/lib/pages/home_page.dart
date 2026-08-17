@@ -147,6 +147,19 @@ class _HomePageState extends State<HomePage> {
           return ListView(
             padding: const EdgeInsets.all(16),
             children: [
+              // P2P (WebRTC direct) can have longer round-trips than the relay
+              // tunnel on some networks — let the user block it and always use
+              // the tunnel. Persisted; also adjustable inside the remote view.
+              Card(
+                margin: const EdgeInsets.only(bottom: 12),
+                child: SwitchListTile(
+                  secondary: const Icon(Icons.wifi_tethering_off),
+                  title: const Text('屏蔽 P2P 直连'),
+                  subtitle: const Text('P2P 直连响应慢时开启，始终走中继隧道'),
+                  value: state.blockP2P,
+                  onChanged: (v) => state.setBlockP2P(v),
+                ),
+              ),
               if (_error != null)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 12),

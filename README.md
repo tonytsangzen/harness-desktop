@@ -367,6 +367,28 @@ trial — see the [deployment guide](mobile/relay/deploy/README.md) which
 includes a Dockerfile, an auto-HTTPS Caddy reverse proxy, and a
 docker-compose stack.
 
+## Mobile app (iOS & Android)
+
+The Flutter app in [`mobile/app/`](mobile/app/) turns a phone into a remote
+monitor for the desktop's dsh UI — pair by scanning the desktop's QR
+(`relay://` URL) or typing the device ID + 6-digit PIN, then connect through,
+in order of preference:
+
+1. **LAN direct** (`lan=` carried in the pairing QR): the phone loads the
+   desktop's dsh web straight over Wi-Fi through the local proxy — no tunnel.
+2. **WebRTC P2P**: a direct NAT-traversed data channel, signaled through the
+   relay — the default when the desktop isn't on the same LAN.
+3. **Relay tunnel**: everything (page, assets, `/api` RPC, event stream)
+   bounces through the Go relay (`mobile/relay`) — always works as a fallback,
+   and P2P falls back to it automatically when the channel closes.
+
+If P2P's round-trips feel slower than the tunnel on your network, block it:
+flip the **屏蔽 P2P 直连** (block P2P direct) switch on the home page, or tap
+the connection chip at the top-right of the remote view (shows
+"P2P 直连" / "中继隧道") and toggle it there — the active P2P channel is
+dropped immediately, the session keeps running over the relay tunnel, and the
+choice persists for later sessions.
+
 ## Project layout
 
 ```
@@ -406,6 +428,11 @@ docker-compose stack.
 │       ├── update_manager.cpp  npm registry version check (libsoup3)
 │       ├── node_runtime_manager.cpp  auto-install Node.js LTS (download + tar.xz + PATH)
 │       └── util.cpp          env, config dir, file helpers, version compare
+├── mobile/                   Mobile remote app + relay + bridge
+│   ├── app/                  Flutter app (iOS & Android): pairing, LAN/P2P/relay connect
+│   ├── bridge/               Node bridge: desktop ↔ relay tunnel / WebRTC P2P
+│   ├── relay/                Go relay server (deploy/ has Docker + Caddy + nginx)
+│   └── p2p_probe/            Standalone WebRTC probe tool (development)
 ├── Info.plist                macOS bundle configuration
 ├── AppIcon.icns              macOS application icon (committed)
 ├── AppIcon.ico               Windows application icon (committed, embedded via `windows/resources.rc`)

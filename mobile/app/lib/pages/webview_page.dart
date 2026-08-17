@@ -16,6 +16,7 @@ import '../core/app_state.dart';
 import '../core/foreground_service.dart';
 import '../core/lan_backend.dart';
 import '../core/p2p_client.dart';
+import '../core/relay_client.dart';
 import '../core/tunnel_backend.dart';
 import '../core/web_proxy.dart';
 
@@ -34,6 +35,12 @@ class _WebviewPageState extends State<WebviewPage> {
   bool _lanMode = false; // currently loading the desktop directly on the LAN
   bool _fellBack = false; // already fell back from LAN to the relay tunnel
   P2pClient? _p2p;
+  /// In-flight P2P upgrade attempt (before the data channel opens), so a
+  /// block/unblock race can't leave two channels fighting over the proxy.
+  P2pClient? _p2pConnecting;
+  /// The relay tunnel backend the page started on; P2P may take over, and the
+  /// "block P2P" switch falls back to it.
+  RelayClient? _relayClient;
 
   @override
   void initState() {
@@ -67,14 +74,29 @@ class _WebviewPageState extends State<WebviewPage> {
       return;
     }
     final relayClient = client;
+    _relayClient = relayClient;
 
     // 1) Load through the relay tunnel immediately (no waiting).
     _launchWith(relayClient);
 
     // 2) In the background, try to upgrade to a direct WebRTC data channel
     //    (signaling rides the relay tunnel). On success the proxy's backend
-    //    switches live; on close it falls back to the tunnel.
+    //    switches live; on close it falls back to the tunnel. Skipped when
+    //    the user blocked P2P (its round-trips can be slower than the tunnel).
+    _tryUpgradeToP2P();
+  }
+
+  /// Attempt the relay-tunnel → WebRTC P2P upgrade, unless the user blocked
+  /// P2P or an upgrade is already in flight / active.
+  void _tryUpgradeToP2P() {
+    final relayClient = _relayClient;
+    if (relayClient == null || _p2p != null || _p2pConnecting != null) return;
+    if (widget.state.blockP2P) {
+      print('[dsh] P2P blocked by user setting, staying on relay tunnel');
+      return;
+    }
     final p2p = P2pClient(relayClient);
+    _p2pConnecting = p2p;
     p2p.onClosed = () {
       if (mounted && _proxy != null && _p2p == p2p) {
         print('[dsh] P2P closed, falling back to relay tunnel');
@@ -84,7 +106,10 @@ class _WebviewPageState extends State<WebviewPage> {
       p2p.dispose();
     };
     p2p.connect().then((ok) {
-      if (ok && mounted && _proxy != null) {
+      if (_p2pConnecting == p2p) _p2pConnecting = null;
+      // Re-check the block flag: the user may have blocked P2P while the
+      // offer/answer was in flight — then don't activate the channel.
+      if (ok && mounted && _proxy != null && !widget.state.blockP2P) {
         print('[dsh] P2P data channel active, upgraded backend');
         _proxy!.useBackend(p2p);
         _p2p = p2p;
@@ -92,8 +117,110 @@ class _WebviewPageState extends State<WebviewPage> {
         p2p.dispose();
       }
     }).catchError((Object e) {
+      if (_p2pConnecting == p2p) _p2pConnecting = null;
       p2p.dispose();
     });
+  }
+
+  /// Apply the "block P2P" switch live: when blocking, drop any active P2P
+  /// channel (and any in-flight upgrade) and fall back to the relay tunnel
+  /// now; when un-blocking, retry the upgrade. The setting itself is persisted
+  /// by [AppState.setBlockP2P].
+  Future<void> _setP2pBlocked(bool blocked) async {
+    await widget.state.setBlockP2P(blocked);
+    if (!mounted) return;
+    if (blocked) {
+      final connecting = _p2pConnecting;
+      _p2pConnecting = null;
+      connecting?.dispose();
+      final p2p = _p2p;
+      _p2p = null;
+      p2p?.dispose();
+      final relay = _relayClient;
+      if (relay != null && _proxy != null) {
+        print('[dsh] P2P blocked, backend switched to relay tunnel');
+        _proxy!.useBackend(relay);
+      }
+    } else {
+      _tryUpgradeToP2P();
+    }
+    if (mounted) setState(() {});
+  }
+
+  /// Bottom sheet from the connection chip: show the current backend and the
+  /// "block P2P" switch (takes effect immediately, persisted).
+  Future<void> _showConnectionSheet() async {
+    var blocked = widget.state.blockP2P;
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('连接方式', style: Theme.of(ctx).textTheme.titleMedium),
+                const SizedBox(height: 4),
+                Text(
+                  _p2p != null ? '当前：P2P 直连' : '当前：中继隧道',
+                  style: Theme.of(ctx).textTheme.bodySmall,
+                ),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  secondary: const Icon(Icons.wifi_tethering_off),
+                  title: const Text('屏蔽 P2P 直连'),
+                  subtitle: const Text('始终走中继隧道；P2P 直连响应慢时建议开启'),
+                  value: blocked,
+                  onChanged: (v) {
+                    setSheetState(() => blocked = v);
+                    _setP2pBlocked(v);
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Small floating chip over the WebView showing which backend is active;
+  /// tapping it opens the connection / "block P2P" sheet. Hidden in LAN mode.
+  Widget _buildConnectionChip() {
+    if (_lanMode || _proxy == null) return const SizedBox.shrink();
+    final p2pActive = _p2p != null;
+    final color = p2pActive ? Colors.indigo : Colors.blueGrey;
+    return Material(
+      color: color,
+      elevation: 3,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: _showConnectionSheet,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                p2pActive ? Icons.wifi_tethering : Icons.cloud,
+                size: 16,
+                color: Colors.white,
+              ),
+              const SizedBox(width: 6),
+              Text(
+                p2pActive ? 'P2P 直连' : '中继隧道',
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+              ),
+              const SizedBox(width: 4),
+              const Icon(Icons.tune, size: 14, color: Colors.white70),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   void _launchWith(TunnelBackend backend) {
@@ -152,6 +279,7 @@ class _WebviewPageState extends State<WebviewPage> {
     ForegroundService.stop();
     _proxy?.close();
     _lanBackend?.dispose();
+    _p2pConnecting?.dispose();
     _p2p?.dispose();
     widget.state.disconnect();    super.dispose();
   }
@@ -260,7 +388,18 @@ class _WebviewPageState extends State<WebviewPage> {
               ? const Center(child: CircularProgressIndicator())
               : SafeArea(
                   // Keep the web view below the system status bar / notch.
-                  child: WebViewWidget(controller: _controller!),
+                  child: Stack(
+                    children: [
+                      WebViewWidget(controller: _controller!),
+                      // Floating connection chip (relay tunnel / P2P direct);
+                      // tap to block or re-enable P2P.
+                      Positioned(
+                        top: 8,
+                        right: 8,
+                        child: _buildConnectionChip(),
+                      ),
+                    ],
+                  ),
                 ),
     );
   }

@@ -16,6 +16,7 @@ class AppState extends ChangeNotifier {
       : _storage = storage ?? const FlutterSecureStorage();
 
   static const _kConnections = 'connections_v1';
+  static const _kBlockP2P = 'block_p2p_v1';
 
   /// Debug logging visible in `adb logcat -s flutter` on release builds.
   static void _log(String msg) => print('[dsh_mobile] $msg');
@@ -34,6 +35,12 @@ class AppState extends ChangeNotifier {
   /// The connection the remote view is bound to (for LAN-direct mode).
   SavedConnection? currentConnection;
 
+  /// User setting: never use the WebRTC P2P data channel — always route the
+  /// remote WebView through the relay tunnel. P2P round-trips can be slower
+  /// than the tunnel on some networks, so the user can block it from the home
+  /// page switch or the remote view's connection chip. Persisted.
+  bool blockP2P = false;
+
   /// Last raw session.list reply (truncated) — shown on the sessions page
   /// when the list is empty, for on-device diagnosis.
   String? debugLastReply;
@@ -50,9 +57,21 @@ class AppState extends ChangeNotifier {
           ..sort((a, b) => b.pairedAt.compareTo(a.pairedAt));
         _log('init: loaded ${connections.length} connections');
       }
+      final p2pRaw = await _storage.read(key: _kBlockP2P);
+      blockP2P = p2pRaw == '1';
+      _log('init: blockP2P=$blockP2P');
     } catch (e) {
       _log('init ERROR: $e');
     }
+    notifyListeners();
+  }
+
+  /// Persist the "block P2P" setting (relay tunnel only) and notify the UI.
+  Future<void> setBlockP2P(bool v) async {
+    if (blockP2P == v) return;
+    blockP2P = v;
+    await _storage.write(key: _kBlockP2P, value: v ? '1' : '0');
+    _log('blockP2P set to $v');
     notifyListeners();
   }
 
