@@ -127,7 +127,7 @@ struct MenuStrings {
         settings: "Settings…",
         customRelay: "Custom relay server address",
         relayHint: "The remote app connects to this machine through this cloud relay. Used by Remote Connect.",
-        pairingPin: "Pairing PIN",
+        pairingPin: "Pairing PIN"
     )
 
     static let chinese = MenuStrings(
@@ -172,7 +172,7 @@ struct MenuStrings {
         settings: "设置…",
         customRelay: "自定义中继服务器地址",
         relayHint: "远程 App 通过该云端中继连接本机。保存后「远程连接」使用此地址。",
-        pairingPin: "配对 PIN",
+        pairingPin: "配对 PIN"
     )
 
     static func forLanguage(_ language: AppLanguage) -> MenuStrings {
