@@ -48,6 +48,10 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${VERSION}"
 
+      - name: Install mobile bridge dependencies
+        working-directory: mobile/bridge
+        run: npm ci
+
       - name: Build app bundle (universal arm64 + x86_64)
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -104,6 +108,10 @@ jobs:
             $v = "0.1." + ($env:GITHUB_RUN_NUMBER % 60000)
           }
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$v"
+
+      - name: Install mobile bridge dependencies
+        working-directory: mobile/bridge
+        run: npm ci
 
       - name: Configure (VS generator, ${{ matrix.arch }})
         shell: pwsh
@@ -248,6 +256,10 @@ jobs:
             v="0.1.$(( ${GITHUB_RUN_NUMBER} % 60000 ))"
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Install mobile bridge dependencies
+        working-directory: mobile/bridge
+        run: npm ci
 
       - name: Configure (Ninja, Release)
         run: |
