@@ -148,6 +148,9 @@ jobs:
             -cg BridgeComponents -gg -scom -sfrag -template:fragment `
             -dr INSTALLFOLDER -var var.BridgeDir -out bridge.wxs -arch x64
           if ($LASTEXITCODE -ne 0) { throw "heat failed" }
+          # ICE80: heat's -arch does not always stamp Win64="yes" onto
+          # fragment components, so mark every harvested component 64-bit.
+          (Get-Content bridge.wxs -Raw) -replace '<Component Id="', '<Component Win64="yes" Id="' | Set-Content bridge.wxs
 
       - name: Build MSI installer (WiX v3)
         shell: pwsh
