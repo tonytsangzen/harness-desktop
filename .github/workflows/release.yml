@@ -292,6 +292,10 @@ jobs:
             "$pkg/usr/share/icons/hicolor/scalable/apps/"
           cp linux/resources/deepseek-harness.png \
             "$pkg/usr/share/icons/hicolor/256x256/apps/"
+          # The YAML block indents the heredoc; strip exactly that indentation
+          # (dpkg-deb rejects leading whitespace on control fields, while the
+          # Description continuation lines keep their extra single space).
+          sed -i 's/^ \{10\}//' "$pkg/DEBIAN/control"
           dpkg-deb --build --root-owner-group "$pkg"
 
       - name: Upload artifacts

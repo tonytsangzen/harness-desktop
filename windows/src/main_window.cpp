@@ -1572,7 +1572,7 @@ INT_PTR CALLBACK MainWindow::SettingsDlgProc(HWND hDlg, UINT msg, WPARAM wParam,
 void MainWindow::OnAbout() {
     bool zh = IsChinese();
 
-    std::string engine = LocalVersion();
+    std::string engine = DSHUpdateManager::LocalVersion();
     if (engine.empty()) engine = zh ? "未安装" : "not installed";
     std::wstring node = NodeRuntimeManager::NodeVersion();
     if (node.empty()) node = zh ? L"未安装" : L"not installed";
@@ -1598,7 +1598,7 @@ void MainWindow::OnSettings() {
     HGLOBAL tmpl = BuildDialogTemplate(zh ? L"设置" : L"Settings", 288, 162, items);
     if (!tmpl) return;
     DialogBoxIndirectParamW(GetModuleHandleW(nullptr),
-                            reinterpret_cast<LPCTSTR>(tmpl),
+                            reinterpret_cast<LPCDLGTEMPLATEW>(tmpl),
                             hwnd_, SettingsDlgProc,
                             reinterpret_cast<LPARAM>(&relay));
     GlobalFree(tmpl);
@@ -1652,7 +1652,7 @@ void MainWindow::OnMobileRemote() {
 }
 
 void MainWindow::StartBridge(const std::wstring& relay, const std::string& deviceId) {
-    std::wstring node = NodePath();
+    std::wstring node = NodeRuntimeManager::NodePath();
     if (node.empty()) {
         MessageBoxW(hwnd_, IsChinese() ? L"未找到 Node.js。" : L"Node.js not found.",
                     L"DSH WebView", MB_ICONERROR | MB_OK);
@@ -1765,8 +1765,8 @@ INT_PTR CALLBACK MainWindow::PairingDialogProc(HWND hDlg, UINT msg, WPARAM wPara
         auto* ctx = reinterpret_cast<PairingCtx*>(lParam);
         SetWindowLongPtrW(hDlg, DWLP_USER, lParam);
         bool zh = MainWindow::Instance().IsChinese();
-        SetDlgItemTextW(hDlg, 103, (zh ? L"PIN: " : L"PIN: ") + ctx->pin);
-        SetDlgItemTextW(hDlg, 104, (zh ? L"设备码: " : L"Device ID: ") + ctx->deviceId);
+        SetDlgItemTextW(hDlg, 103, ((zh ? L"PIN: " : L"PIN: ") + ctx->pin).c_str());
+        SetDlgItemTextW(hDlg, 104, ((zh ? L"设备码: " : L"Device ID: ") + ctx->deviceId).c_str());
         SetDlgItemTextW(hDlg, 105, zh ? L"在 Harness 远程 App 中扫描上方二维码；或手动输入设备码与 PIN。"
                                       : L"Scan the QR code in the Harness Remote app, or enter the device ID and PIN manually.");
         if (!ctx->qrPNG.empty()) {
@@ -1803,7 +1803,7 @@ void MainWindow::ShowPairingDialog(const std::wstring& pin, const std::wstring& 
     HGLOBAL tmpl = BuildDialogTemplate(zh ? L"远程连接配对" : L"Remote Connect Pairing", 228, 372, items);
     if (!tmpl) return;
     DialogBoxIndirectParamW(GetModuleHandleW(nullptr),
-                            reinterpret_cast<LPCTSTR>(tmpl),
+                            reinterpret_cast<LPCDLGTEMPLATEW>(tmpl),
                             hwnd_, PairingDialogProc,
                             reinterpret_cast<LPARAM>(&ctx));
     GlobalFree(tmpl);
