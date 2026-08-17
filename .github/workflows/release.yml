@@ -230,17 +230,21 @@ jobs:
             libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
           if [ "${{ matrix.cross }}" = "true" ]; then
             sudo dpkg --add-architecture arm64
-            # Ubuntu's amd64 repos (archive/security.ubuntu.com) carry no arm64
-            # indexes; pin the existing sources to amd64 and add the arm64
-            # Ubuntu Ports sources (ports.ubuntu.com) instead.
-            if [ -f /etc/apt/sources.list ]; then
-              sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
-            fi
+            # Runner images now use deb822 sources (/etc/apt/sources.list.d/
+            # *.sources), so pinning the legacy sources.list no longer works:
+            # the primary mirror (azure/archive.ubuntu.com) then serves both
+            # architectures, whose versions drift from ubuntu-ports → the
+            # multi-arch resolver can't install :arm64 packages ("not
+            # installable" / "not going to be installed"). Fix: drop the
+            # image's own sources entirely and serve BOTH amd64 and arm64 from
+            # ubuntu-ports, so the two architectures always see identical
+            # versions.
+            sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
             printf '%s\n' \
-              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse' \
-              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse' \
-              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse' \
-              | sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null
+              'deb http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse' \
+              'deb http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse' \
+              'deb http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse' \
+              | sudo tee /etc/apt/sources.list.d/ports.list >/dev/null
             sudo apt-get update
             sudo apt-get install -y \
               crossbuild-essential-arm64 \
