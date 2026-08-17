@@ -69,7 +69,6 @@ struct MenuStrings {
     let mobileRemoteActive: String
     let mobileRemoteStop: String
     let mobileRemoteRelay: String
-    let mobileRemotePin: String
     let mobileRemoteCode: String
     let mobileRemoteHint: String
     let mobileRemoteWaiting: String
@@ -113,7 +112,6 @@ struct MenuStrings {
         mobileRemoteActive: "Connected.",
         mobileRemoteStop: "Disconnect",
         mobileRemoteRelay: "Relay address",
-        mobileRemotePin: "PIN",
         mobileRemoteCode: "Pairing code",
         mobileRemoteHint: "Scan the QR code in the Harness Remote app, or enter the pairing code and PIN manually.",
         mobileRemoteWaiting: "Waiting for the Remote app to connect…",
@@ -158,7 +156,6 @@ struct MenuStrings {
         mobileRemoteActive: "已连接。",
         mobileRemoteStop: "断开",
         mobileRemoteRelay: "中继地址",
-        mobileRemotePin: "PIN",
         mobileRemoteCode: "配对码",
         mobileRemoteHint: "在 Harness 远程 App 中扫描下方二维码；或手动输入配对码与 PIN。",
         mobileRemoteWaiting: "等待远程 App 连接…",
@@ -1296,7 +1293,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var remoteSwitchRef: NSSwitch?
     private var remoteInfoView: NSStackView?
     private var remoteQrView: NSImageView?
-    private var remotePinLabel: NSTextField?
     private var remoteCodeLabel: NSTextField?
     private var remoteRelayLabel: NSTextField?
     private var remoteStatusLabel: NSTextField?
@@ -1923,25 +1919,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         remoteRow.orientation = .horizontal
         remoteRow.spacing = 8
 
-        // Connection info area (QR + PIN + code + status) — hidden until on.
+        // Connection info area (QR + code + status) — hidden until on.
         let qrView = NSImageView()
         qrView.imageScaling = .scaleProportionallyUpOrDown
-        let infoPin = NSTextField(labelWithString: "")
-        infoPin.font = NSFont.monospacedDigitSystemFont(ofSize: 28, weight: .bold)
-        infoPin.alignment = .center
         let infoCode = NSTextField(labelWithString: "")
         infoCode.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        infoCode.alignment = .center
+        infoCode.alignment = .left
         infoCode.isSelectable = true
         let infoRelay = NSTextField(labelWithString: "")
         infoRelay.font = NSFont.systemFont(ofSize: 11)
         infoRelay.textColor = .secondaryLabelColor
-        infoRelay.alignment = .center
+        infoRelay.alignment = .left
         let infoStatus = NSTextField(labelWithString: s.mobileRemoteWaiting)
         infoStatus.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        infoStatus.alignment = .center
+        infoStatus.alignment = .left
         infoStatus.lineBreakMode = .byTruncatingTail
-        let infoView = NSStackView(views: [qrView, infoPin, infoCode, infoRelay, infoStatus])
+        let infoView = NSStackView(views: [qrView, infoCode, infoRelay, infoStatus])
         infoView.orientation = .vertical
         infoView.alignment = .width
         infoView.spacing = 8
@@ -1982,7 +1975,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         remoteSwitchRef = remoteSwitch
         remoteInfoView = infoView
         remoteQrView = qrView
-        remotePinLabel = infoPin
         remoteCodeLabel = infoCode
         remoteRelayLabel = infoRelay
         remoteStatusLabel = infoStatus
@@ -2180,7 +2172,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let s = uiStrings
         remoteInfoView?.isHidden = false
         remoteQrView?.image = NSImage(data: qrPNG)
-        remotePinLabel?.stringValue = "\(s.mobileRemotePin): \(pairing.pin)"
         remoteCodeLabel?.stringValue = "\(s.mobileRemoteCode): \(deviceID)"
         remoteRelayLabel?.stringValue = "\(s.mobileRemoteRelay): \(mobileRemote?.relayURL ?? "")"
         remoteStatusLabel?.stringValue = s.mobileRemoteWaiting

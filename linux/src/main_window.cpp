@@ -1370,17 +1370,9 @@ void MainWindow::ShowPairingDialog(const std::string& pin, const std::string& de
         g_object_unref(loader);
     }
 
-    std::string pinText = (IsChinese() ? "PIN: " : "PIN: ") + pin;
-    GtkWidget* pinLabel = gtk_label_new(pinText.c_str());
-    PangoAttrList* attrs = pango_attr_list_new();
-    pango_attr_list_insert(attrs, pango_attr_size_new_absolute(28 * PANGO_SCALE));
-    pango_attr_list_insert(attrs, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
-    gtk_label_set_attributes(GTK_LABEL(pinLabel), attrs);
-    pango_attr_list_unref(attrs);
-    gtk_box_pack_start(GTK_BOX(box), pinLabel, FALSE, FALSE, 0);
-
     std::string codeText = (IsChinese() ? "设备码: " : "Device ID: ") + deviceId;
     GtkWidget* codeLabel = gtk_label_new(codeText.c_str());
+    gtk_label_set_xalign(GTK_LABEL(codeLabel), 0.0);  // left-aligned
     gtk_label_set_selectable(GTK_LABEL(codeLabel), TRUE);
     gtk_label_set_line_wrap(GTK_LABEL(codeLabel), TRUE);
     gtk_box_pack_start(GTK_BOX(box), codeLabel, FALSE, FALSE, 0);
@@ -1389,6 +1381,7 @@ void MainWindow::ShowPairingDialog(const std::string& pin, const std::string& de
         ? "在 Harness 远程 App 中扫描上方二维码；或手动输入设备码与 PIN。"
         : "Scan the QR code in the Harness Remote app, or enter the device ID and PIN manually.";
     GtkWidget* hintLabel = gtk_label_new(hint.c_str());
+    gtk_label_set_xalign(GTK_LABEL(hintLabel), 0.0);  // left-aligned
     gtk_label_set_line_wrap(GTK_LABEL(hintLabel), TRUE);
     gtk_box_pack_start(GTK_BOX(box), hintLabel, FALSE, FALSE, 0);
 

@@ -1765,7 +1765,6 @@ INT_PTR CALLBACK MainWindow::PairingDialogProc(HWND hDlg, UINT msg, WPARAM wPara
         auto* ctx = reinterpret_cast<PairingCtx*>(lParam);
         SetWindowLongPtrW(hDlg, DWLP_USER, lParam);
         bool zh = MainWindow::Instance().IsChinese();
-        SetDlgItemTextW(hDlg, 103, ((zh ? L"PIN: " : L"PIN: ") + ctx->pin).c_str());
         SetDlgItemTextW(hDlg, 104, ((zh ? L"设备码: " : L"Device ID: ") + ctx->deviceId).c_str());
         SetDlgItemTextW(hDlg, 105, zh ? L"在 Harness 远程 App 中扫描上方二维码；或手动输入设备码与 PIN。"
                                       : L"Scan the QR code in the Harness Remote app, or enter the device ID and PIN manually.");
@@ -1794,13 +1793,12 @@ void MainWindow::ShowPairingDialog(const std::wstring& pin, const std::wstring& 
     bool zh = IsChinese();
     std::vector<TemplateItem> items = {
         { 102, L"Static", L"", SS_BITMAP | SS_CENTERIMAGE | WS_CHILD | WS_VISIBLE, 14, 14, 200, 200 },
-        { 103, L"Static", L"", SS_CENTER | WS_CHILD | WS_VISIBLE, 14, 224, 200, 32 },
-        { 104, L"Static", L"", SS_CENTER | WS_CHILD | WS_VISIBLE, 14, 258, 200, 26 },
-        { 105, L"Static", L"", SS_CENTER | WS_CHILD | WS_VISIBLE, 14, 288, 200, 44 },
-        { IDOK, L"Button", L"OK", BS_PUSHBUTTON | WS_TABSTOP | WS_CHILD | WS_VISIBLE, 90, 340, 60, 24 },
+        { 104, L"Static", L"", SS_LEFT | WS_CHILD | WS_VISIBLE, 14, 224, 200, 26 },
+        { 105, L"Static", L"", SS_LEFT | WS_CHILD | WS_VISIBLE, 14, 254, 200, 44 },
+        { IDOK, L"Button", L"OK", BS_PUSHBUTTON | WS_TABSTOP | WS_CHILD | WS_VISIBLE, 90, 306, 60, 24 },
     };
     PairingCtx ctx{ pin, deviceId, qrPNG };
-    HGLOBAL tmpl = BuildDialogTemplate(zh ? L"远程连接配对" : L"Remote Connect Pairing", 228, 372, items);
+    HGLOBAL tmpl = BuildDialogTemplate(zh ? L"远程连接配对" : L"Remote Connect Pairing", 228, 338, items);
     if (!tmpl) return;
     DialogBoxIndirectParamW(GetModuleHandleW(nullptr),
                             reinterpret_cast<LPCDLGTEMPLATEW>(tmpl),
