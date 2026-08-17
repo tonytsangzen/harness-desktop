@@ -133,6 +133,12 @@ jobs:
             -Force
           Remove-Item staging/DSHWebView.exe -Force
 
+      - name: Download WiX toolset
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "$env:WIX_URL" -OutFile wix.zip -UseBasicParsing
+          Expand-Archive wix.zip wix
+
       - name: Harvest mobile bridge into WiX fragment
         shell: pwsh
         run: |
@@ -144,8 +150,6 @@ jobs:
       - name: Build MSI installer (WiX v3)
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "$env:WIX_URL" -OutFile wix.zip -UseBasicParsing
-          Expand-Archive wix.zip wix
           $exe = (Resolve-Path "windows/build-${{ matrix.name }}/Release/DSHWebView.exe").Path
           $icon = (Resolve-Path "AppIcon.ico").Path
           # Quote every -d define as one token so dotted versions (e.g. 1.0.5)
