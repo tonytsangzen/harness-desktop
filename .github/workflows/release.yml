@@ -92,9 +92,13 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $v = $env:GITHUB_REF_NAME
-          if ($v -like 'v*') { $v = $v.Substring(1) }
-          if (-not $v) { $v = '1.0.0' }
+          # Prefer the tag ref (refs/tags/v1.0.1 -> 1.0.1); fall back to a
+          # run number for manual dispatch (GITHUB_REF_NAME would be "main").
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF.Substring(11)
+          } else {
+            $v = "$(Get-Date -Format yyyyMMdd).$env:GITHUB_RUN_NUMBER"
+          }
           Add-Content -Path $env:GITHUB_OUTPUT -Value "version=$v"
 
       - name: Configure (VS generator, ${{ matrix.arch }})
@@ -120,8 +124,10 @@ jobs:
         run: |
           Copy-Item -Recurse mobile/bridge staging/bridge
           Remove-Item staging/bridge/package-lock.json -ErrorAction SilentlyContinue
+          # Temporary name inside staging so Compress-Archive can pick it up
+          # (the -portable.zip path is only the DestinationPath).
           Copy-Item "windows/build-${{ matrix.name }}/Release/DSHWebView.exe" `
-            "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}-portable.zip"
+            "staging/DSHWebView.exe"
           Compress-Archive -Path "staging/DSHWebView.exe","staging/bridge" `
             -DestinationPath "staging/DeepSeek Harness-${{ steps.version.outputs.version }}-${{ matrix.name }}-portable.zip" `
             -Force
@@ -222,8 +228,13 @@ jobs:
       - name: Resolve version (from tag or default)
         id: version
         run: |
-          v="${GITHUB_REF_NAME#v}"
-          if [ -z "$v" ]; then v='1.0.0'; fi
+          # Prefer the tag ref (refs/tags/v1.0.1 -> 1.0.1); fall back to a
+          # run number for manual dispatch (GITHUB_REF_NAME would be "main").
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            v="${GITHUB_REF#refs/tags/v}"
+          else
+            v="$(date +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
       - name: Configure (Ninja, Release)
