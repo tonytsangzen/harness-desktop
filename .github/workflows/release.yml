@@ -224,34 +224,36 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            sudo dpkg --add-architecture arm64
+            # amd64 and arm64 live on separate Ubuntu mirror trees: archive/
+            # azure has no arm64 indexes and ports.ubuntu.com has no amd64
+            # indexes at all. The runner's own sources (legacy OR deb822 —
+            # format varies across image updates) must not serve both arches,
+            # so drop them and pin each arch to its authoritative official
+            # mirror (archive + security for amd64, ports for arm64). Both are
+            # the same Ubuntu publishing pipeline, so shared packages carry
+            # identical versions on both arches.
+            sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
+            printf '%s\n' \
+              'deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse' \
+              'deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse' \
+              'deb [arch=amd64] http://security.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse' \
+              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse' \
+              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse' \
+              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse' \
+              | sudo tee /etc/apt/sources.list >/dev/null
+            sudo apt-get update
+          else
+            sudo apt-get update
+          fi
           sudo apt-get install -y \
             cmake ninja-build pkg-config g++ \
             libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev
           if [ "${{ matrix.cross }}" = "true" ]; then
-            sudo dpkg --add-architecture arm64
-            # amd64 and arm64 live on separate Ubuntu mirror trees (archive/
-            # azure carries no arm64 indexes; ports.ubuntu.com carries no
-            # amd64 indexes at all), so every source must serve exactly one
-            # architecture. Runner images now use deb822 sources
-            # (/etc/apt/sources.list.d/ubuntu.sources), which pinning only the
-            # legacy sources.list silently misses.
-            if [ -f /etc/apt/sources.list ]; then
-              sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
-            fi
-            sudo grep -l '^Types: deb' /etc/apt/sources.list.d/*.sources 2>/dev/null | while read -r f; do
-              sudo sed -i '/^Architectures: /d; /^Types: deb/a Architectures: amd64' "$f"
-            done
-            # arm64 comes from Ubuntu Ports (the only complete arm64 tree).
-            printf '%s\n' \
-              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy main restricted universe multiverse' \
-              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-updates main restricted universe multiverse' \
-              'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ jammy-security main restricted universe multiverse' \
-              | sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null
-            sudo apt-get update
-            # The two mirror trees can briefly drift (their CDN nodes sync at
-            # slightly different times), which breaks the multi-arch rule that
-            # a shared package must have the same version on both arches. Retry
+            # The two mirror trees can briefly drift (CDN nodes sync at
+            # slightly different times), breaking the multi-arch rule that a
+            # shared package must have the same version on both arches. Retry
             # a few times: a later refresh usually hits an in-sync node.
             for attempt in 1 2 3 4; do
               if sudo apt-get install -y \
