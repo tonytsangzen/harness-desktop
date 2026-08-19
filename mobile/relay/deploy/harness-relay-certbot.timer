@@ -1,0 +1,20 @@
+# 中继服务器证书每天两次自动续期（Let's Encrypt 建议：每天检查 + 随机延迟）
+# 安装:
+#   sudo install -m 644 harness-relay-certbot.{service,timer} /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now harness-relay-certbot.timer
+# 状态查看:
+#   systemctl list-timers harness-relay-certbot.timer
+#   journalctl -u harness-relay-certbot.service -e
+[Unit]
+Description=Twice-daily Let's Encrypt renewal for dsh relay
+
+[Timer]
+# 每天 00:00 与 12:00 触发，附加 0~30 分钟随机延迟（避免服务器扎堆打 Let's Encrypt）
+OnCalendar=*-*-* 00,12:00:00
+RandomizedDelaySec=1800
+# 错过触发（如关机）则在开机后补跑
+Persistent=true
+
+[Install]
+WantedBy=timers.target

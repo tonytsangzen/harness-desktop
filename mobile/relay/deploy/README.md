@@ -70,6 +70,34 @@ sudo systemctl enable --now dsh-relay
 
 ---
 
+## 证书申请与自动续期（nginx 反代路线）
+
+nginx 反代（非 Caddy）时 TLS 证书由 Let's Encrypt 提供，本目录配套三个脚本：
+
+| 文件 | 作用 |
+|---|---|
+| `certbot-issue.sh` | 首次申请（`certbot --nginx` 自动改写配置并 reload，幂等） |
+| `certbot-renew.sh` | 续期（只续临近过期的证书，复用私钥 → 手机 App 证书固定不受影响） |
+| `harness-relay-certbot.{service,timer}` | systemd 定时任务（每天 00:00 / 12:00 + 随机延迟） |
+
+```bash
+sudo apt install -y nginx certbot python3-certbot-nginx
+sudo ./certbot-issue.sh -e you@example.com          # 域名默认 relay.deepvisus.top，可用 -d 覆盖
+sudo install -m 755 certbot-renew.sh /usr/local/sbin/certbot-renew.sh
+sudo install -m 644 harness-relay-certbot.service harness-relay-certbot.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now harness-relay-certbot.timer
+curl https://relay.deepvisus.top/relay/healthz      # → ok
+```
+
+- 续期后 nginx 插件自动 reload，新证书立即生效；隧道断连由客户端自动重连
+- 无 systemd 的环境用 cron：`17 3,15 * * * root /usr/local/sbin/certbot-renew.sh`
+- 大陆网络 80 端口被封导致 http-01 失败时，改用 Caddy 路线（自动管理证书）或 DNS-01 challenge
+- 证书固定说明：`certbot renew` 默认**不换私钥**（SPKI 不变），手机端 pin 不会失效；只有
+  `--renew-with-new-key` 才换钥（密钥泄露场景），换后需同步更新手机端 pin
+
+---
+
 ## 路线 B：Cloudflare Tunnel（零服务器）
 
 前提：有域名（cloudflare.com 托管的域名，几块钱/年），relay 跑在自己电脑。

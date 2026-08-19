@@ -1,0 +1,8 @@
+# 中继服务器 Let's Encrypt 证书续期（oneshot，由 timer 触发）
+# 安装: 见 certbot-renew.sh 头部注释
+[Unit]
+Description=Renew Let's Encrypt certificate for dsh relay
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/certbot-renew.sh
