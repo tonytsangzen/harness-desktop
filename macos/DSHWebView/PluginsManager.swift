@@ -36,6 +36,19 @@ struct MarketPlugin {
         guard let pkg = npmPackage else { return false }
         return installed.contains(pkg)
     }
+
+    /// A pnpm-compatible git dependency spec for repo-type entries
+    /// (e.g. "github:owner/repo"), nil for npm packages. Lets the market
+    /// install GitHub repos directly (cloned into the profile).
+    var gitSpec: String? {
+        guard type == "repo" else { return nil }
+        if let id, id.hasPrefix("gh:") { return "github:" + id.dropFirst(3) }
+        if let u = URL(string: url), u.host == "github.com" {
+            let parts = u.path.split(separator: "/").map(String.init)
+            if parts.count >= 2 { return "github:\(parts[0])/\(parts[1])" }
+        }
+        return nil
+    }
 }
 
 /// Loads and parses the plugin market index.
@@ -221,7 +234,9 @@ enum ProfilePlugins {
         }
     }
 
-    /// Whether pnpm is available for `dsh plugin` to forward to.
+    /// Whether pnpm is available for `dsh plugin` to forward to. Runs with
+    /// the node bin dir prepended (the GUI app's PATH is minimal and usually
+    /// misses Homebrew, where both node and pnpm typically live).
     static func pnpmAvailable() -> Bool {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -229,6 +244,12 @@ enum ProfilePlugins {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
+        var env = ProcessInfo.processInfo.environment
+        if let binDir = NodeRuntimeManager.binDirectoryFromNodePath() {
+            let existing = env["PATH"] ?? ""
+            env["PATH"] = "\(binDir):\(existing)"
+        }
+        p.environment = env
         do { try p.run(); p.waitUntilExit() } catch { return false }
         return p.terminationStatus == 0
     }
@@ -527,6 +548,11 @@ final class PluginsWindowController: NSObject {
                     identifier: pkg)
                 button.isEnabled = true
                 actions.append(button)
+            } else if let spec = plugin.gitSpec {
+                // GitHub repo: install directly as a git dependency.
+                let install = actionButton(s.install, action: #selector(installPressed(_:)), identifier: spec)
+                install.isEnabled = true
+                actions.append(install)
             }
             actions.append(actionButton(s.open, action: #selector(openPressed(_:)), identifier: plugin.url))
             return pluginRow(title: plugin.displayName,
