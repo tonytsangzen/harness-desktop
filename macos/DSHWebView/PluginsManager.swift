@@ -264,6 +264,7 @@ private struct PluginsStrings {
     let enabled, disabled, notInstalled, version, category, stars, npmPackage, repo: String
     let restartHint, restartNow, doneInstall, doneUninstall, pnpmMissing: String
     let noRestartNeeded: String
+    let localInstall, localInstallTitle, localInstallPrompt, localBadPackage, localBadFile: String
 
     static func current() -> PluginsStrings {
         let lang = AppLanguage(rawValue: UserDefaults.standard.integer(forKey: "appLanguage")) ?? .system
@@ -280,7 +281,10 @@ private struct PluginsStrings {
                 restartHint: "插件层变更需重启 dsh web 生效", restartNow: "重启 dsh web",
                 doneInstall: "安装完成", doneUninstall: "卸载完成",
                 pnpmMissing: "未找到 pnpm（安装插件需要它，请先安装 corepack/pnpm）",
-                noRestartNeeded: "无需重启（未声明为 bundle 的包作为普通依赖安装）")
+                noRestartNeeded: "无需重启（未声明为 bundle 的包作为普通依赖安装）",
+                localInstall: "从本地安装…", localInstallTitle: "选择插件包（目录或 .tgz/.tar.gz）",
+                localInstallPrompt: "安装", localBadPackage: "所选目录中没有 package.json",
+                localBadFile: "不支持的包文件（支持目录或 .tgz/.tar.gz）")
         }
         return PluginsStrings(
             title: "Plugins", installedTab: "Installed", enabledTab: "Enabled", marketTab: "Market",
@@ -294,7 +298,10 @@ private struct PluginsStrings {
             restartNow: "Restart dsh web",
             doneInstall: "Installed", doneUninstall: "Uninstalled",
             pnpmMissing: "pnpm not found (required to install plugins; install corepack/pnpm first)",
-            noRestartNeeded: "No restart needed (installed as a plain dependency, not a bundle)")
+            noRestartNeeded: "No restart needed (installed as a plain dependency, not a bundle)",
+            localInstall: "Install from Local…", localInstallTitle: "Choose a plugin package (directory or .tgz/.tar.gz)",
+            localInstallPrompt: "Install", localBadPackage: "The selected directory has no package.json",
+            localBadFile: "Unsupported package file (use a directory or .tgz/.tar.gz)")
     }
 }
 
@@ -399,10 +406,13 @@ final class PluginsWindowController: NSObject {
         restart.bezelStyle = .rounded
         restart.isHidden = true
 
+        let local = NSButton(title: s.localInstall, target: self, action: #selector(localInstallPressed(_:)))
+        local.bezelStyle = .rounded
+
         let refresh = NSButton(title: s.refresh, target: self, action: #selector(refreshPressed(_:)))
         refresh.bezelStyle = .rounded
 
-        let bottomRow = NSStackView(views: [status, NSView(), restart, refresh])
+        let bottomRow = NSStackView(views: [status, NSView(), restart, local, refresh])
         bottomRow.orientation = .horizontal
         bottomRow.spacing = 10
         root.addArrangedSubview(bottomRow)
@@ -622,6 +632,66 @@ final class PluginsWindowController: NSObject {
 
     @objc private func refreshPressed(_ sender: Any?) {
         refreshAll()
+    }
+
+    /// Choose a local plugin package (directory with package.json, or a
+    /// .tgz/.tar.gz tarball) and install it into the profile.
+    @objc private func localInstallPressed(_ sender: Any?) {
+        guard let panel else { return }
+        let openPanel = NSOpenPanel()
+        openPanel.title = s.localInstallTitle
+        openPanel.prompt = s.localInstallPrompt
+        openPanel.canChooseFiles = true
+        openPanel.canChooseDirectories = true
+        openPanel.allowsMultipleSelection = false
+        openPanel.resolvesAliases = true
+        openPanel.beginSheetModal(for: panel) { [weak self] response in
+            guard let self, response == .OK, let url = openPanel.url else { return }
+            self.performLocalInstall(url)
+        }
+    }
+
+    /// Validate the chosen local path and install it via `dsh plugin add`.
+    private func performLocalInstall(_ url: URL) {
+        let path = url.path
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else {
+            setStatus("\(path): not found")
+            return
+        }
+        if isDir.boolValue {
+            guard FileManager.default.fileExists(
+                atPath: url.appendingPathComponent("package.json").path) else {
+                setStatus(s.localBadPackage)
+                return
+            }
+        } else {
+            let ext = url.pathExtension.lowercased()
+            guard ext == "tgz" || ext == "tar" || ext.hasSuffix("gz") else {
+                setStatus(s.localBadFile)
+                return
+            }
+        }
+        guard !busy else { return }
+        guard ProfilePlugins.pnpmAvailable() else {
+            setStatus(s.pnpmMissing)
+            return
+        }
+        setBusy(true, "\(s.install) \(url.lastPathComponent)…")
+        // Absolute path spec: pnpm treats it as a file:/local package and
+        // dsh plugin reconciles bundles by the package's real name.
+        ProfilePlugins.runDshPlugin(args: ["add", path]) { [weak self] ok, output in
+            guard let self else { return }
+            self.setBusy(false, nil)
+            self.refreshLocal()
+            if ok {
+                self.needsRestartHint = true
+                self.render()
+                self.setStatus("\(url.lastPathComponent) — \(s.doneInstall) · \(s.restartHint)")
+            } else {
+                self.setStatus("\(s.install) \(url.lastPathComponent): \(output)")
+            }
+        }
     }
 
     @objc private func installPressed(_ sender: NSButton) {
