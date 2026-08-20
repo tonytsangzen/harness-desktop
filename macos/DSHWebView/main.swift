@@ -66,6 +66,7 @@ struct MenuStrings {
     let exitFullScreen: String
     let help: String
     let pluginsMarket: String
+    let pluginsManager: String
     let mobileRemote: String
     let mobileRemoteActive: String
     let mobileRemoteStop: String
@@ -110,6 +111,7 @@ struct MenuStrings {
         exitFullScreen: "Exit Full Screen",
         help: "Help",
         pluginsMarket: "Plugins Market…",
+        pluginsManager: "Plugins…",
         mobileRemote: "Remote Connect…",
         mobileRemoteActive: "Connected.",
         mobileRemoteStop: "Disconnect",
@@ -155,6 +157,7 @@ struct MenuStrings {
         exitFullScreen: "退出全屏",
         help: "帮助",
         pluginsMarket: "插件市场…",
+        pluginsManager: "插件管理…",
         mobileRemote: "远程连接…",
         mobileRemoteActive: "已连接。",
         mobileRemoteStop: "断开",
@@ -223,6 +226,10 @@ struct Settings {
             case "--command":
                 i = args.index(after: i)
                 if i < args.endIndex { command = args[i].split(separator: " ").map(String.init) } else { fatalError("--command needs a value") }
+            case "--plugins":
+                // Debug hook: open the plugins manager window on launch.
+                // Swallowed here so the launcher accepts the flag.
+                break
             case "--help", "-h":
                 printUsage()
                 exit(0)
@@ -1351,6 +1358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private var pendingLogTail = ""
     private let updateManager = DSHUpdateManager()
     private var updateCheckInFlight = false
+    private var pluginsController: PluginsWindowController?
     private var mobileRemote: MobileRemoteManager?
     private var relayPanel: NSPanel?
     private var relayField: NSTextField?
@@ -1433,6 +1441,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         buildMenu()
         buildWindow()
         ensureNodeRuntime()
+        // Debug/demo hook: `DSHWebView --plugins` opens the plugins manager
+        // window right away (also used by the smoke test).
+        if CommandLine.arguments.contains("--plugins") {
+            openPluginsManager(nil)
+        }
     }
 
     // MARK: - Runtime provisioning
@@ -1894,6 +1907,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         // Remote Connect now lives inside Settings… (toggle + QR + PIN).
         viewMenu.addItem(.separator())
         viewMenu.addItem(
+            withTitle: s.pluginsManager,
+            action: #selector(openPluginsManager(_:)),
+            keyEquivalent: ""
+        )
+        viewMenu.addItem(
             withTitle: s.settings,
             action: #selector(openSettings(_:)),
             keyEquivalent: ""
@@ -1901,13 +1919,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         viewMenuItem.submenu = viewMenu
 
-        // Help menu (external links / documentation).
+        // Help menu (external links / documentation / plugin management).
         let helpMenuItem = NSMenuItem()
         mainMenu.addItem(helpMenuItem)
         let helpMenu = NSMenu(title: s.help)
         helpMenu.addItem(
             withTitle: s.pluginsMarket,
-            action: #selector(openPluginsMarket(_:)),
+            action: #selector(openPluginsManager(_:)),
             keyEquivalent: ""
         )
         helpMenuItem.submenu = helpMenu
@@ -1922,10 +1940,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     // MARK: - Update checking
 
-    /// Menu action: open the plugins market in the system default browser.
-    @objc private func openPluginsMarket(_ sender: Any?) {
-        guard let url = URL(string: "https://tonytsangzen.github.io/harness-market/") else { return }
-        openInDefaultBrowser(url)
+    /// Menu action: open the native plugins manager window (installed /
+    /// enabled / market tabs with install, uninstall, enable, disable).
+    @objc private func openPluginsManager(_ sender: Any?) {
+        if pluginsController == nil {
+            let controller = PluginsWindowController()
+            controller.onRestartRequested = { [weak self] in self?.restartServer() }
+            pluginsController = controller
+        }
+        pluginsController?.show()
+    }
+
+    /// Restart the dsh web server so plugin layer changes take effect, then
+    /// reload the webview. Used by the plugins manager.
+    private func restartServer() {
+        server.stop()
+        // Give the old process a moment to release its port before the
+        // readiness probe decides whether another instance is already there.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            self.server.start()
+            self.loadUI()
+        }
     }
 
     // MARK: - Settings
