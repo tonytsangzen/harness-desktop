@@ -116,29 +116,62 @@ enum ProfilePlugins {
         profileDir.appendingPathComponent("package.json")
     }
 
-    /// Installed dependency names (package.json `dependencies`) plus any
-    /// top-level directories in the profile's node_modules.
+    /// Directly installed dependency names (package.json `dependencies`).
+    /// Only these are "installed plugins" — transitive deps live in the
+    /// dependency tree (see `dependencyTree()`), not as flat entries.
     static func installedPackages() -> [String] {
-        var names = Set<String>()
-        if let dict = readPackageJSON(),
-           let deps = dict["dependencies"] as? [String: Any] {
-            names.formUnion(deps.keys)
+        guard let dict = readPackageJSON(),
+              let deps = dict["dependencies"] as? [String: Any] else { return [] }
+        return deps.keys.sorted()
+    }
+
+    /// One node of the installed-plugin dependency tree.
+    struct PluginNode {
+        let name: String
+        /// True for the shipped template bundles (present in the enabled
+        /// layer but not in `dependencies`); they get no action buttons.
+        let builtin: Bool
+        let children: [PluginNode]
+    }
+
+    /// The installed plugins organised by dependency: roots are the directly
+    /// installed packages (plus the enabled template bundles), children are
+    /// each package's own dependencies (resolved from the profile's
+    /// node_modules, depth-limited and cycle-guarded).
+    static func dependencyTree() -> [PluginNode] {
+        let direct = Set(installedPackages())
+        var roots = direct.sorted().map { node(for: $0, depth: 0, visited: []) }
+        for bundle in enabledBundles() where !direct.contains(bundle) {
+            roots.append(PluginNode(name: bundle, builtin: true, children: []))
         }
-        let nm = profileDir.appendingPathComponent("node_modules", isDirectory: true)
-        if let entries = try? FileManager.default.contentsOfDirectory(
-            at: nm, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-            for entry in entries {
-                let name = entry.lastPathComponent
-                if name == ".pnpm" || name == ".bin" || name.hasPrefix(".") { continue }
-                if name.hasPrefix("@"), let subs = try? FileManager.default.contentsOfDirectory(
-                    at: entry, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
-                    for sub in subs { names.insert("@\(name)/\(sub.lastPathComponent)") }
-                } else {
-                    names.insert(name)
-                }
+        return roots
+    }
+
+    private static func node(for name: String, depth: Int, visited: Set<String>) -> PluginNode {
+        guard depth < 4, !visited.contains(name) else {
+            return PluginNode(name: name, builtin: false, children: [])
+        }
+        var seen = visited
+        seen.insert(name)
+        var children: [PluginNode] = []
+        if let deps = packageJSON(name: name)?["dependencies"] as? [String: Any] {
+            for dep in deps.keys.sorted() {
+                children.append(node(for: dep, depth: depth + 1, visited: seen))
             }
         }
-        return names.sorted()
+        return PluginNode(name: name, builtin: false, children: children)
+    }
+
+    /// Read a package's manifest from the profile's node_modules (pnpm
+    /// hoists dependencies to the top level, so a top-level lookup covers
+    /// direct installs and hoisted transitive deps alike).
+    private static func packageJSON(name: String) -> [String: Any]? {
+        let dir = profileDir
+            .appendingPathComponent("node_modules", isDirectory: true)
+            .appendingPathComponent(name, isDirectory: true)
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent("package.json")),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return obj
     }
 
     /// Enabled bundle names (`dsh.profile.bundles`), in layer order.
@@ -264,7 +297,9 @@ private struct PluginsStrings {
     let enabled, disabled, notInstalled, version, category, stars, npmPackage, repo: String
     let restartHint, restartNow, doneInstall, doneUninstall, pnpmMissing: String
     let noRestartNeeded: String
+    let installDependency: String
     let localInstall, localInstallTitle, localInstallPrompt, localBadPackage, localBadFile: String
+    let builtin: String
 
     static func current() -> PluginsStrings {
         let lang = AppLanguage(rawValue: UserDefaults.standard.integer(forKey: "appLanguage")) ?? .system
@@ -282,9 +317,11 @@ private struct PluginsStrings {
                 doneInstall: "安装完成", doneUninstall: "卸载完成",
                 pnpmMissing: "未找到 pnpm（安装插件需要它，请先安装 corepack/pnpm）",
                 noRestartNeeded: "无需重启（未声明为 bundle 的包作为普通依赖安装）",
+                installDependency: "依赖",
                 localInstall: "从本地安装…", localInstallTitle: "选择插件包（目录或 .tgz/.tar.gz）",
                 localInstallPrompt: "安装", localBadPackage: "所选目录中没有 package.json",
-                localBadFile: "不支持的包文件（支持目录或 .tgz/.tar.gz）")
+                localBadFile: "不支持的包文件（支持目录或 .tgz/.tar.gz）",
+                builtin: "内置")
         }
         return PluginsStrings(
             title: "Plugins", installedTab: "Installed", enabledTab: "Enabled", marketTab: "Market",
@@ -299,9 +336,11 @@ private struct PluginsStrings {
             doneInstall: "Installed", doneUninstall: "Uninstalled",
             pnpmMissing: "pnpm not found (required to install plugins; install corepack/pnpm first)",
             noRestartNeeded: "No restart needed (installed as a plain dependency, not a bundle)",
+            installDependency: "Dependency",
             localInstall: "Install from Local…", localInstallTitle: "Choose a plugin package (directory or .tgz/.tar.gz)",
             localInstallPrompt: "Install", localBadPackage: "The selected directory has no package.json",
-            localBadFile: "Unsupported package file (use a directory or .tgz/.tar.gz)")
+            localBadFile: "Unsupported package file (use a directory or .tgz/.tar.gz)",
+            builtin: "Built-in")
     }
 }
 
@@ -501,19 +540,45 @@ final class PluginsWindowController: NSObject {
     }
 
     private func installedRows() -> [NSView] {
-        let all = installed.sorted()
-        if all.isEmpty { return [emptyRow(s.emptyInstalled)] }
-        return all.map { name in
-            let isEnabled = enabled.contains(name)
-            let toggle = actionButton(isEnabled ? s.disable : s.enable,
-                                      action: #selector(toggleEnabledPressed(_:)),
-                                      identifier: name)
-            let remove = actionButton(s.uninstall, action: #selector(uninstallPressed(_:)), identifier: name)
-            return pluginRow(title: name,
-                             subtitle: isEnabled ? s.enabled : s.disabled,
-                             titleColor: isEnabled ? .labelColor : .secondaryLabelColor,
-                             actions: [toggle, remove])
+        let tree = ProfilePlugins.dependencyTree()
+        if tree.isEmpty { return [emptyRow(s.emptyInstalled)] }
+        var rows: [NSView] = []
+        // Roots (directly installed) get enable/disable + uninstall actions;
+        // transitive dependency rows are shown indented as context only.
+        func walk(_ node: ProfilePlugins.PluginNode, depth: Int) {
+            let isEnabled = enabled.contains(node.name)
+            let indent = CGFloat(depth) * 18
+            if depth == 0 {
+                let toggle = actionButton(isEnabled ? s.disable : s.enable,
+                                          action: #selector(toggleEnabledPressed(_:)),
+                                          identifier: node.name)
+                var actions = [toggle]
+                if !node.builtin {
+                    actions.append(actionButton(s.uninstall,
+                                                action: #selector(uninstallPressed(_:)),
+                                                identifier: node.name))
+                }
+                let subtitle = node.builtin
+                    ? "\(isEnabled ? s.enabled : s.disabled) · \(s.builtin)"
+                    : (isEnabled ? s.enabled : s.disabled)
+                rows.append(pluginRow(title: node.name,
+                                      subtitle: subtitle,
+                                      titleColor: .labelColor,
+                                      indent: indent,
+                                      actions: actions))
+            } else {
+                // Transitive dependency: read-only row, dimmed and indented.
+                rows.append(pluginRow(title: node.name,
+                                      subtitle: s.installDependency,
+                                      titleColor: .secondaryLabelColor,
+                                      indent: indent,
+                                      titleFontSize: 11,
+                                      actions: []))
+            }
+            for child in node.children { walk(child, depth: depth + 1) }
         }
+        for root in tree { walk(root, depth: 0) }
+        return rows
     }
 
     private func enabledRows() -> [NSView] {
@@ -591,9 +656,10 @@ final class PluginsWindowController: NSObject {
 
     /// Build one plugin row: title + subtitle + trailing action buttons.
     private func pluginRow(title: String, subtitle: String, titleColor: NSColor,
+                           indent: CGFloat = 0, titleFontSize: CGFloat = 13,
                            actions: [NSButton], toolTip: String? = nil) -> NSView {
         let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = NSFont.systemFont(ofSize: titleFontSize, weight: .semibold)
         titleLabel.textColor = titleColor
         titleLabel.lineBreakMode = .byTruncatingTail
 
@@ -611,7 +677,16 @@ final class PluginsWindowController: NSObject {
         actionsStack.orientation = .horizontal
         actionsStack.spacing = 6
 
-        let row = NSStackView(views: [texts, NSView(), actionsStack])
+        var leading: [NSView] = []
+        if indent > 0 {
+            let spacer = NSView()
+            spacer.translatesAutoresizingMaskIntoConstraints = false
+            spacer.widthAnchor.constraint(equalToConstant: indent).isActive = true
+            leading.append(spacer)
+        }
+        leading.append(texts)
+
+        let row = NSStackView(views: leading + [NSView(), actionsStack])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 10
