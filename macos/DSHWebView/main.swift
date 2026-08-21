@@ -241,9 +241,11 @@ struct Settings {
 
         // Append the resolved host/port onto the dsh web invocation so the
         // server and the webview agree, unless the caller supplied a full
-        // custom command (which we take at face value).
+        // custom command (which we take at face value). --no-open stops the
+        // engine from popping the default browser at startup (the shell's
+        // own webview is the UI).
         if command == ["npx", "--yes", "--verbose", "@deepseek-ai/dsh", "web"] {
-            command.append(contentsOf: ["--host", host, "--port", String(port)])
+            command.append(contentsOf: ["--host", host, "--port", String(port), "--no-open"])
         }
 
         self.host = host

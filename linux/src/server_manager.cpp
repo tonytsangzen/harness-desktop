@@ -149,6 +149,9 @@ bool Start() {
         cmd.push_back(g_settings->host);
         cmd.push_back("--port");
         cmd.push_back(std::to_string(g_activePort));
+        // The engine opens the Web UI in the default browser unless told not
+        // to; the shell's own webview is the UI, so suppress that popup.
+        cmd.push_back("--no-open");
     }
 
     std::vector<char*> argv;

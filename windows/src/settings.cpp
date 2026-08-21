@@ -75,6 +75,9 @@ Settings Settings::Parse(const std::vector<std::wstring>& args) {
         s.command.push_back(s.host);
         s.command.push_back(L"--port");
         s.command.push_back(std::to_wstring(s.port));
+        // The engine opens the Web UI in the default browser unless told not
+        // to; the shell's own webview is the UI, so suppress that popup.
+        s.command.push_back(L"--no-open");
     }
 
     return s;
