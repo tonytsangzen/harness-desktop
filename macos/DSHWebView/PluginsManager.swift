@@ -368,6 +368,8 @@ final class PluginsWindowController: NSObject {
     private var enabled: [String] = []
     private var busy = false
     private var needsRestartHint = false
+    /// Paths of tree nodes the user expanded (default: all collapsed).
+    private var expandedPaths: Set<String> = []
 
     /// Called when the user asks to restart the dsh web server (plugin layer
     /// changes only apply after a restart). Wired up by AppDelegate.
@@ -543,11 +545,30 @@ final class PluginsWindowController: NSObject {
         let tree = ProfilePlugins.dependencyTree()
         if tree.isEmpty { return [emptyRow(s.emptyInstalled)] }
         var rows: [NSView] = []
-        // Roots (directly installed) get enable/disable + uninstall actions;
-        // transitive dependency rows are shown indented as context only.
-        func walk(_ node: ProfilePlugins.PluginNode, depth: Int) {
+        // Collapsible tree: roots are always visible; a node's children show
+        // only while its path is in `expandedPaths` (toggle via the +/- row
+        // button). Roots get enable/disable + uninstall actions, transitive
+        // dependency rows are read-only context.
+        func walk(_ node: ProfilePlugins.PluginNode, depth: Int, path: String) {
             let isEnabled = enabled.contains(node.name)
             let indent = CGFloat(depth) * 18
+            let hasChildren = !node.children.isEmpty
+            let isExpanded = expandedPaths.contains(path)
+
+            let expandButton: NSButton?
+            if hasChildren {
+                let btn = NSButton(title: isExpanded ? "−" : "+",
+                                   target: self, action: #selector(toggleExpandPressed(_:)))
+                btn.bezelStyle = .inline
+                btn.controlSize = .small
+                btn.identifier = NSUserInterfaceItemIdentifier(path)
+                btn.translatesAutoresizingMaskIntoConstraints = false
+                btn.widthAnchor.constraint(equalToConstant: 18).isActive = true
+                expandButton = btn
+            } else {
+                expandButton = nil
+            }
+
             if depth == 0 {
                 let toggle = actionButton(isEnabled ? s.disable : s.enable,
                                           action: #selector(toggleEnabledPressed(_:)),
@@ -565,6 +586,7 @@ final class PluginsWindowController: NSObject {
                                       subtitle: subtitle,
                                       titleColor: .labelColor,
                                       indent: indent,
+                                      leading: expandButton,
                                       actions: actions))
             } else {
                 // Transitive dependency: read-only row, dimmed and indented.
@@ -572,12 +594,18 @@ final class PluginsWindowController: NSObject {
                                       subtitle: s.installDependency,
                                       titleColor: .secondaryLabelColor,
                                       indent: indent,
+                                      leading: expandButton,
                                       titleFontSize: 11,
                                       actions: []))
             }
-            for child in node.children { walk(child, depth: depth + 1) }
+
+            if hasChildren && isExpanded {
+                for child in node.children {
+                    walk(child, depth: depth + 1, path: path + "/" + child.name)
+                }
+            }
         }
-        for root in tree { walk(root, depth: 0) }
+        for root in tree { walk(root, depth: 0, path: root.name) }
         return rows
     }
 
@@ -656,7 +684,8 @@ final class PluginsWindowController: NSObject {
 
     /// Build one plugin row: title + subtitle + trailing action buttons.
     private func pluginRow(title: String, subtitle: String, titleColor: NSColor,
-                           indent: CGFloat = 0, titleFontSize: CGFloat = 13,
+                           indent: CGFloat = 0, leading: NSView? = nil,
+                           titleFontSize: CGFloat = 13,
                            actions: [NSButton], toolTip: String? = nil) -> NSView {
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = NSFont.systemFont(ofSize: titleFontSize, weight: .semibold)
@@ -677,16 +706,17 @@ final class PluginsWindowController: NSObject {
         actionsStack.orientation = .horizontal
         actionsStack.spacing = 6
 
-        var leading: [NSView] = []
+        var leadingViews: [NSView] = []
+        if let leading { leadingViews.append(leading) }
         if indent > 0 {
             let spacer = NSView()
             spacer.translatesAutoresizingMaskIntoConstraints = false
             spacer.widthAnchor.constraint(equalToConstant: indent).isActive = true
-            leading.append(spacer)
+            leadingViews.append(spacer)
         }
-        leading.append(texts)
+        leadingViews.append(texts)
 
-        let row = NSStackView(views: leading + [NSView(), actionsStack])
+        let row = NSStackView(views: leadingViews + [NSView(), actionsStack])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 10
@@ -698,6 +728,17 @@ final class PluginsWindowController: NSObject {
     // MARK: - Actions
 
     @objc private func tabChanged(_ sender: NSSegmentedControl) {
+        render()
+    }
+
+    /// Expand/collapse a dependency-tree node (the +/- button on its row).
+    @objc private func toggleExpandPressed(_ sender: NSButton) {
+        guard let path = sender.identifier?.rawValue else { return }
+        if expandedPaths.contains(path) {
+            expandedPaths.remove(path)
+        } else {
+            expandedPaths.insert(path)
+        }
         render()
     }
 
