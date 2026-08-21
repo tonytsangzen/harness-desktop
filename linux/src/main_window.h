@@ -78,6 +78,9 @@ private:
     static gboolean OnPollServer(gpointer userData);
     void OnServerReady();
     void OnServerFailed();
+    // Stops and restarts the dsh web server (plugin layer changes only apply
+    // after a restart); re-polls until the port is ready again.
+    void RestartServer();
     // Reads bytes newly appended to the server log files (stdout + stderr),
     // updating the last-line label. Returns true when anything new arrived
     // (the caller then resets the startup timeout countdown).
@@ -132,7 +135,7 @@ private:
     static void OnThemeToggled(GtkWidget* item, gpointer userData);
     static void OnLangToggled(GtkWidget* item, gpointer userData);
     static void OnFullScreenToggled(GtkWidget* item, gpointer userData);
-    static void OnPluginsMarketActivate(GtkWidget* item, gpointer userData);
+    static void OnPluginsManagerActivate(GtkWidget* item, gpointer userData);
     static void OnSettingsActivate(GtkWidget* item, gpointer userData);
     static void OnAboutActivate(GtkWidget* item, gpointer userData);
     static void OnEditActivate(GtkWidget* item, gpointer userData);

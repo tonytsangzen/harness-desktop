@@ -23,6 +23,8 @@ add_executable(dshwebview
     src/server_manager.cpp
     src/update_manager.cpp
     src/node_runtime_manager.cpp
+    src/json.cpp
+    src/plugins_manager.cpp
     src/main_window.cpp
     ../third_party/qrcodegen/qrcodegen.c
 )

@@ -5,6 +5,7 @@
 #endif
 
 #include "node_runtime_manager.h"
+#include "plugins_manager.h"
 #include "server_manager.h"
 #include "settings.h"
 #include "update_manager.h"
@@ -464,10 +465,17 @@ void MainWindow::RebuildMenu() {
         gtk_menu_shell_append(GTK_MENU_SHELL(menubar_), item);
     }
 
+    // ---- Plugins Manager ----
+    {
+        GtkWidget* item = gtk_menu_item_new_with_label(zh ? "插件管理…" : "Plugins…");
+        g_signal_connect(item, "activate", G_CALLBACK(OnPluginsManagerActivate), this);
+        gtk_menu_shell_append(GTK_MENU_SHELL(menubar_), item);
+    }
+
     // ---- Plugins Market ----
     {
-        GtkWidget* item = gtk_menu_item_new_with_label(zh ? "插件市场" : "Plugins Market");
-        g_signal_connect(item, "activate", G_CALLBACK(OnPluginsMarketActivate), this);
+        GtkWidget* item = gtk_menu_item_new_with_label(zh ? "插件市场…" : "Plugins Market…");
+        g_signal_connect(item, "activate", G_CALLBACK(OnPluginsManagerActivate), this);
         gtk_menu_shell_append(GTK_MENU_SHELL(menubar_), item);
     }
 
@@ -1009,9 +1017,20 @@ void MainWindow::OnFullScreenToggled(GtkWidget* item, gpointer userData) {
     }
 }
 
-void MainWindow::OnPluginsMarketActivate(GtkWidget* /*item*/, gpointer userData) {
+void MainWindow::OnPluginsManagerActivate(GtkWidget* /*item*/, gpointer userData) {
     auto* self = static_cast<MainWindow*>(userData);
-    self->OpenExternal("https://tonytsangzen.github.io/harness-market/");
+    PluginsManager::ShowDialog(GTK_WINDOW(self->window_), self->IsChinese(),
+                               [self]() { self->RestartServer(); });
+}
+
+// Stops and restarts the dsh web server, re-polling until it is ready again
+// (plugin layer changes only apply after a restart).
+void MainWindow::RestartServer() {
+    ServerManager::Stop();
+    ServerManager::Start();
+    serverReady_ = false;
+    pollStartedUs_ = g_get_monotonic_time();
+    g_timeout_add(250, OnPollServer, this);
 }
 
 void MainWindow::OnAboutActivate(GtkWidget* /*item*/, gpointer userData) {
