@@ -9,6 +9,7 @@
 #include "http.h"
 #include "json.h"
 #include "node_runtime_manager.h"
+#include "plugins_manager.h"
 #include "resource.h"
 #include "server_manager.h"
 #include "settings.h"
@@ -67,6 +68,7 @@ const UINT_PTR kSpinnerTimer = 1;
 const UINT_PTR kRegisterTimerId = 2;
 const int kDownloadBarHeight = 48;
 const UINT_PTR kIDM_PluginsMarket = 40001;
+const UINT_PTR kIDM_PluginsManager = 40012;
 const UINT_PTR kIDM_ThemeSystem = 40002;
 const UINT_PTR kIDM_ThemeLight = 40003;
 const UINT_PTR kIDM_ThemeDark = 40004;
@@ -522,7 +524,9 @@ void MainWindow::RebuildMenu() {
                 kIDM_LangEn, L"English");
     AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(langMenu), zh ? L"语言" : L"Language");
 
-    // Plugins Market.
+    // Plugins manager (native dialog; the market tab opens the browser for
+    // individual entries).
+    AppendMenuW(menu, MF_STRING, kIDM_PluginsManager, zh ? L"插件管理…" : L"Plugins Manager…");
     AppendMenuW(menu, MF_STRING, kIDM_PluginsMarket, zh ? L"插件市场" : L"Plugins Market");
 
     // Remote connect.
@@ -1035,6 +1039,15 @@ void MainWindow::StartServerThread() {
     if (h) CloseHandle(h);
 }
 
+void MainWindow::RestartServer() {
+    ServerManager::Stop();
+    bool zh = IsChinese();
+    SetOverlayText(zh ? L"正在重启 dsh web…" : L"Restarting dsh web…");
+    SetOverlayProgress(-1);
+    ShowOverlay();
+    StartServerThread();
+}
+
 DWORD WINAPI MainWindow::CheckForUpdate(LPVOID /*param*/) {
     std::string latest;
     if (DSHUpdateManager::LatestIfUpdateAvailable(latest)) {
@@ -1225,8 +1238,9 @@ LRESULT MainWindow::WndProc(UINT msg, WPARAM wParam, LPARAM lParam) {
         case kWM_BridgeLine: OnBridgeLine(reinterpret_cast<std::wstring*>(lParam)); return 0;
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
+                case kIDM_PluginsManager:
                 case kIDM_PluginsMarket:
-                    OpenInDefaultBrowser(L"https://tonytsangzen.github.io/harness-market/");
+                    PluginsManager::Show(hwnd_);
                     return 0;
                 case kIDM_MobileRemote: OnMobileRemote(); return 0;
                 case kIDM_Settings: OnSettings(); return 0;

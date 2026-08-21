@@ -35,6 +35,14 @@ public:
     HWND Hwnd() const { return hwnd_; }
     void Close();
 
+    // Stops and restarts the dsh web server (with the loading overlay),
+    // reloading the webview when ready. Used by the plugins manager dialog
+    // after plugin-layer changes.
+    void RestartServer();
+
+    // Whether the current UI language resolves to Chinese (used by dialogs).
+    bool IsChinese() const;
+
 private:
     struct DownloadInfo {
         std::wstring filename;
@@ -73,7 +81,6 @@ private:
     void OnTimer(WPARAM wParam);
 
     // Theme & language.
-    bool IsChinese() const;
     void LoadSettings(); // read theme/language from the registry
     void SaveSettings(); // write theme/language to the registry
     void RebuildMenu();  // recreate the menu bar with the current language/state

@@ -56,6 +56,7 @@ add_executable(DSHWebView WIN32
     src/http.cpp
     src/json.cpp
     src/util.cpp
+    src/plugins_manager.cpp
     src/main_window.cpp
     ../third_party/qrcodegen/qrcodegen.c
     resources.rc
