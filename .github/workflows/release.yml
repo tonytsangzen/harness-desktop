@@ -467,13 +467,16 @@ jobs:
           mapfile -t assets < <(find artifacts -type f ! -name '*.wixpdb' -print | sort)
           echo "ref=${GITHUB_REF_NAME} tag=${tag} assets=${#assets[@]}"
           printf '  %s\n' "${assets[@]}"
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            echo "release exists — uploading assets"
-            gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" --clobber
-          else
-            echo "release missing — creating it"
-            gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --generate-notes
-          fi
+          # Rebuild the release from scratch: deleting the remote tag (e.g.
+          # when re-releasing a version) orphans the old release — it stays
+          # visible to `gh release view` (token auth) but invisible to the
+          # anonymous API, so the old upload branch would keep feeding the
+          # orphan and the release would never rebind to the new tag. Delete
+          # first (no-op if missing/orphaned) so `gh release create` always
+          # produces a release bound to the current tag.
+          gh release delete "${GITHUB_REF_NAME}" --yes --cleanup-tag 2>/dev/null || true
+          echo "creating release ${GITHUB_REF_NAME} with ${#assets[@]} assets"
+          gh release create "${GITHUB_REF_NAME}" "${assets[@]}" --generate-notes
           # Post-condition: the release must exist with all assets attached.
           gh release view "${GITHUB_REF_NAME}" \
             --json tagName,assets \
