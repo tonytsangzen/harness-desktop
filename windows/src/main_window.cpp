@@ -1021,7 +1021,7 @@ DWORD WINAPI MainWindow::EnsureNodeAndStartServer(LPVOID /*param*/) {
     // shown at the bottom); WaitUntilReady also resets its countdown on them.
     ServerManager::SetLogHandler([](const std::wstring& line) { PostOverlayLog(line); });
 
-    if (!ServerManager::WaitUntilReady(15 * 60 * 1000)) {
+    if (!ServerManager::WaitUntilReady(180 * 1000)) {
         PostOverlayStatus(L"Timed out waiting for the dsh server.");
         PostServerFailed();
         return 1;
@@ -1084,7 +1084,7 @@ DWORD WINAPI MainWindow::RefreshUpdate(LPVOID /*param*/) {
         return 1;
     }
     ServerManager::SetLogHandler([](const std::wstring& line) { PostOverlayLog(line); });
-    if (!ServerManager::WaitUntilReady(10 * 60 * 1000)) {
+    if (!ServerManager::WaitUntilReady(180 * 1000)) {
         PostUpdateFinished(false);
         return 1;
     }

@@ -43,9 +43,12 @@ std::wstring Utf8ToWide(const std::string& s) {
 
 // Reads bytes newly appended to the log file (the child appends stdout and
 // stderr here). Returns complete lines; an unterminated tail stays in
-// `pending` until a newline (or a final flush) arrives.
+// `pending` until a newline (or a final flush) arrives. When `grew` is
+// non-null it receives whether any new bytes arrived — the caller resets its
+// idle timeout on *any* output, not just complete lines (npm's \r progress
+// redraws never produce a newline).
 std::vector<std::wstring> DrainLogFile(const std::wstring& path, std::streamoff& lastSize,
-                                       std::string& pending) {
+                                       std::string& pending, bool* grew = nullptr) {
     std::vector<std::wstring> lines;
     std::error_code ec;
     auto size = std::filesystem::file_size(path, ec);
@@ -57,6 +60,7 @@ std::vector<std::wstring> DrainLogFile(const std::wstring& path, std::streamoff&
         }
         return lines;
     }
+    if (grew) *grew = true;
     std::ifstream f(path, std::ios::binary);
     if (!f) return lines;
     f.seekg(lastSize);
@@ -348,11 +352,14 @@ bool WaitUntilReady(int timeoutMs, const std::function<void()>& onWaiting) {
     bool ready = false;
     while (std::chrono::steady_clock::now() < deadline) {
         // Drain new log output first: while the child is alive and producing
-        // output (e.g. npx installing the dsh package), keep waiting. Skipped
-        // when reusing an existing instance — its log file is stale.
+        // output (e.g. npx installing the dsh package), keep waiting. Any
+        // new bytes reset the countdown — npm's progress redraws use \r
+        // without newlines, so line-granularity would stall on a long update.
+        // Skipped when reusing an existing instance — its log file is stale.
         if (!g_reusing) {
-            auto lines = DrainLogFile(LogFilePath(), logPos, logPending);
-            if (!lines.empty()) {
+            bool grew = false;
+            auto lines = DrainLogFile(LogFilePath(), logPos, logPending, &grew);
+            if (grew) {
                 deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
                 for (auto& line : lines) {
                     if (g_onLog) g_onLog(line);
