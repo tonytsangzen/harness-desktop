@@ -699,6 +699,9 @@ final class PluginsWindowController: NSObject {
     }
 
     /// Build one plugin row: title + subtitle + trailing action buttons.
+    /// Returns a plain container positioned by manual frame in the scroll
+    /// document; the inner stack is pinned to the container edges so the
+    /// spacer expands and the action buttons always sit flush right.
     private func pluginRow(title: String, subtitle: String, titleColor: NSColor,
                            indent: CGFloat = 0, leading: NSView? = nil,
                            titleFontSize: CGFloat = 13,
@@ -738,7 +741,19 @@ final class PluginsWindowController: NSObject {
         row.spacing = 10
         row.translatesAutoresizingMaskIntoConstraints = false
         row.toolTip = toolTip
-        return row
+
+        // Manual-frame container (the document lays rows out by frame);
+        // autolayout applies inside the container only.
+        let container = NSView()
+        container.toolTip = toolTip
+        container.addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            row.topAnchor.constraint(equalTo: container.topAnchor),
+            row.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+        return container
     }
 
     // MARK: - Actions
