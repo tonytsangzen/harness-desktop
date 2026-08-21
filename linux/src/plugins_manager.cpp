@@ -798,7 +798,7 @@ void OnLocalDirClicked(GtkWidget* /*w*/, gpointer userData) { OnLocalInstall(sta
 // ---- UI construction -------------------------------------------------------------
 
 GtkWidget* BuildInstalledPage(DialogState* s) {
-    GtkCellRendererText* renderer = gtk_cell_renderer_text_new();
+    GtkCellRenderer* renderer = gtk_cell_renderer_text_new();
     GtkTreeStore* store = gtk_tree_store_new(INST_COLS, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_INT);
     GtkWidget* view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
@@ -823,7 +823,7 @@ GtkWidget* BuildInstalledPage(DialogState* s) {
 }
 
 GtkWidget* BuildEnabledPage(DialogState* s) {
-    GtkCellRendererText* renderer = gtk_cell_renderer_text_new();
+    GtkCellRenderer* renderer = gtk_cell_renderer_text_new();
     GtkListStore* store = gtk_list_store_new(EN_COLS, G_TYPE_UINT, G_TYPE_STRING);
     GtkWidget* view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(store));
     g_object_unref(store);
@@ -842,7 +842,7 @@ GtkWidget* BuildEnabledPage(DialogState* s) {
 }
 
 GtkWidget* BuildMarketPage(DialogState* s) {
-    GtkCellRendererText* renderer = gtk_cell_renderer_text_new();
+    GtkCellRenderer* renderer = gtk_cell_renderer_text_new();
     GtkListStore* store = gtk_list_store_new(MK_COLS, G_TYPE_STRING, G_TYPE_STRING,
                                              G_TYPE_STRING, G_TYPE_STRING,
                                              G_TYPE_STRING, G_TYPE_UINT);
