@@ -528,10 +528,19 @@ final class PluginsWindowController: NSObject {
         default: rows = marketRows(search: searchText)
         }
 
+        // Lay rows out top-down with a uniform height and a subtle separator
+        // line between entries; action buttons already sit at the right edge.
         var y: CGFloat = 6
-        for row in rows {
+        for (index, row) in rows.enumerated() {
             row.frame = NSRect(x: 0, y: y, width: listWidth, height: rowHeight)
             list.addSubview(row)
+            if index < rows.count - 1 {
+                let separator = NSBox()
+                separator.boxType = .separator
+                separator.frame = NSRect(x: 16, y: y + rowHeight + rowGap / 2 - 1,
+                                         width: listWidth - 32, height: 1)
+                list.addSubview(separator)
+            }
             y += rowHeight + rowGap
         }
         list.frame = NSRect(x: 0, y: 0, width: listWidth, height: max(y, 440))
@@ -555,19 +564,26 @@ final class PluginsWindowController: NSObject {
             let hasChildren = !node.children.isEmpty
             let isExpanded = expandedPaths.contains(path)
 
-            let expandButton: NSButton?
+            // Every row gets a fixed-width +/- column so all entries align:
+            // nodes with children toggle expand/collapse, leaf nodes show a
+            // disabled "−" placeholder.
+            let expandButton: NSButton
             if hasChildren {
                 let btn = NSButton(title: isExpanded ? "−" : "+",
                                    target: self, action: #selector(toggleExpandPressed(_:)))
                 btn.bezelStyle = .inline
                 btn.controlSize = .small
                 btn.identifier = NSUserInterfaceItemIdentifier(path)
-                btn.translatesAutoresizingMaskIntoConstraints = false
-                btn.widthAnchor.constraint(equalToConstant: 18).isActive = true
                 expandButton = btn
             } else {
-                expandButton = nil
+                let btn = NSButton(title: "−", target: nil, action: nil)
+                btn.bezelStyle = .inline
+                btn.controlSize = .small
+                btn.isEnabled = false
+                expandButton = btn
             }
+            expandButton.translatesAutoresizingMaskIntoConstraints = false
+            expandButton.widthAnchor.constraint(equalToConstant: 18).isActive = true
 
             if depth == 0 {
                 let toggle = actionButton(isEnabled ? s.disable : s.enable,
