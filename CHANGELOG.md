@@ -1,16 +1,16 @@
 ## [Unreleased]
 
-## [1.1.7] - 2026-08-20
+## [1.1.7] - 2026-08-21
 
 ### 新增
 
-- **macOS 插件管理窗口**：View 菜单「插件管理…」/ Help 菜单「插件市场…」打开原生窗口（替代浏览器跳转），三个 Tab：
-  - **已安装**：直接安装的插件按**依赖树**展示，默认收起、行前 `+`/`−` 展开折叠；每行可 启用/停用/卸载；内置模板（`@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`）标注「内置」且不提供操作
+- **插件管理窗口（三端：macOS / Windows / Linux）**：View 菜单「插件管理…」/ Help 菜单「插件市场…」打开原生窗口（替代浏览器跳转），三个 Tab：
+  - **已安装**：直接安装的插件按**依赖树**展示，默认收起、行前 `+`/`−` 展开折叠；每行可 启用/停用/卸载；内置模板（`@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`）标注「内置」且不提供操作；列表统一行高、弱分割线、按钮右对齐
   - **已启用**：`dsh.profile.bundles` 插件层按序展示，可停用
   - **插件市场**：拉取 `harness-market` 索引（155 个插件），支持本地化搜索；npm 包一键安装、GitHub 仓库直接以 git 依赖安装，另提供「打开」；已安装的条目按钮变为 启用/停用
   - **从本地安装**：选择本地插件目录（含 package.json）或 `.tgz`/`.tar.gz` 直接安装到 profile；声明 `dsh.bundle` 的自动加入启用层，其余作为普通依赖
   - 插件层变更后提供「重启 dsh web」一键生效；修复 GUI 环境 PATH 精简导致 pnpm 检测失败的安装失效问题
-  - 列表统一行高、弱分割线、按钮右对齐，`+/−` 列固定宽度保证对齐
+- **启动不再弹出浏览器网页**：`dsh web` 引擎默认会在默认浏览器打开 Web UI，三端启动命令统一加 `--no-open`（自定义 `--command` 不受影响）
 - **中继服务器 certbot 证书脚本**（`mobile/relay/deploy/`）：`certbot-issue.sh` 一键申请（nginx/standalone/webroot 三种模式，幂等）、`certbot-renew.sh` + systemd timer 每日两次自动续期（续期复用私钥，不影响手机端证书固定）；nginx 反代 TLS 路线完整文档
 
 ## [1.1.6] - 2026-08-18
