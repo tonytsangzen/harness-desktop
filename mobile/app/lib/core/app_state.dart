@@ -79,12 +79,14 @@ class AppState extends ChangeNotifier {
 
   /// Quick reachability probe for a direct LAN connection ("ip:port" from the
   /// pairing QR). Returns true when the desktop's dsh web answers on the LAN.
+  /// Kept short (1s): when the phone is not on the same network this must not
+  /// stall the connect flow — the relay path is started in parallel anyway.
   static Future<bool> lanAvailable(String lan) async {
     try {
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 2);
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 1);
       try {
         final req = await client.getUrl(Uri.parse('http://$lan/'));
-        final resp = await req.close().timeout(const Duration(seconds: 3));
+        final resp = await req.close().timeout(const Duration(seconds: 1));
         return resp.statusCode == 200;
       } finally {
         client.close();

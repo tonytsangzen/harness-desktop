@@ -20,6 +20,12 @@ class LanBackend implements TunnelBackend {
   /// Desktop bridge LAN address, e.g. "192.168.5.4:13080".
   final String lan;
 
+  // One shared client so HTTP keep-alive survives between requests — the
+  // frontend loads many small assets and a fresh TCP connection per request
+  // would add a handshake round trip to every one of them.
+  final HttpClient _client = HttpClient()
+    ..connectionTimeout = const Duration(seconds: 8);
+
   final Map<String, WebSocket> _wsByChannel = {};
   final Map<String, void Function(String data)> _handlers = {};
   int _seq = 0;
@@ -31,9 +37,8 @@ class LanBackend implements TunnelBackend {
     Map<String, String>? headers,
     List<int>? body,
   }) async {
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 8);
     try {
-      final req = await client.openUrl(method, Uri.parse('http://$lan$path'));
+      final req = await _client.openUrl(method, Uri.parse('http://$lan$path'));
       headers?.forEach((k, v) => req.headers.set(k, v));
       if (body != null && body.isNotEmpty) req.add(body);
       final resp = await req.close().timeout(const Duration(seconds: 20));
@@ -47,8 +52,11 @@ class LanBackend implements TunnelBackend {
         headers: respHeaders,
         bodyB64: base64Encode(bytes),
       );
-    } finally {
-      client.close();
+    } catch (_) {
+      // A failed request may have poisoned the shared connection; drop it so
+      // the next request starts clean.
+      _client.close(force: true);
+      rethrow;
     }
   }
 
@@ -99,5 +107,6 @@ class LanBackend implements TunnelBackend {
     for (final ch in _wsByChannel.keys.toList()) {
       closeSse(ch);
     }
+    _client.close(force: true);
   }
 }

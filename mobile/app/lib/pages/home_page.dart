@@ -4,6 +4,8 @@
 /// the current PIN and re-pairs before connecting.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -30,14 +32,30 @@ class _HomePageState extends State<HomePage> {
     try {
       // Direct LAN connect is preferred when the QR carried a LAN address
       // and the desktop's dsh web answers here — no relay tunnel needed.
+      // Start the LAN probe and the relay connect in parallel so an
+      // unreachable LAN (phone off-network) costs at most ~1s instead of
+      // blocking the whole connect until the probe times out.
       final lan = conn.lan;
-      if (lan != null && await AppState.lanAvailable(lan)) {
-        widget.state.currentConnection = conn;
-        if (!mounted) return;
-        Navigator.of(context).pushReplacementNamed('/remote');
-        return;
+      if (lan != null) {
+        final lanFuture = AppState.lanAvailable(lan);
+        final connectFuture = widget.state.connectTo(conn);
+        final lanOk = await lanFuture
+            .timeout(const Duration(seconds: 1), onTimeout: () => false);
+        if (lanOk) {
+          // LAN won: enter the remote view with the LAN backend. Keep the
+          // still-running relay connect alive (ignore its outcome) — the
+          // remote view re-checks the LAN and would otherwise have nothing
+          // to fall back to if that second probe fails.
+          connectFuture.catchError((Object _) {});
+          widget.state.currentConnection = conn;
+          if (!mounted) return;
+          Navigator.of(context).pushReplacementNamed('/remote');
+          return;
+        }
+        await connectFuture;
+      } else {
+        await widget.state.connectTo(conn);
       }
-      await widget.state.connectTo(conn);
       if (!mounted) return;
       if (widget.state.connected) {
         Navigator.of(context).pushReplacementNamed('/remote');

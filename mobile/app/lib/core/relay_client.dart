@@ -34,7 +34,15 @@ class RelayClient implements TunnelBackend {
 
   static StreamChannel<dynamic> _defaultConnector(
           Uri uri, {Map<String, dynamic>? headers}) =>
-      IOWebSocketChannel.connect(uri, headers: headers);
+      IOWebSocketChannel.connect(
+        uri,
+        headers: headers,
+        // Without an explicit connect timeout the underlying HttpClient can
+        // hang for 30s+ on an unreachable relay (TCP/DNS), while connect()
+        // below optimistically returns after 600ms — the app would enter the
+        // remote view with a dead tunnel. Bound the handshake instead.
+        connectTimeout: const Duration(seconds: 8),
+      );
 
   /// Origin (https://relay.deepvisus.top); wss:// is derived.
   final String relayBase;
