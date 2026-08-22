@@ -342,9 +342,9 @@ void MainWindow::BuildUi() {
     gtk_overlay_add_overlay(GTK_OVERLAY(overlay), loadingOverlay_);
 
     // Last server log line, pinned to the bottom of the window while the
-    // loading overlay is up (single line, ellipsized).
+    // loading overlay is up (single line, ellipsized). Normal label color —
+    // dim-label would blend into the background too much.
     loadingLogLabel_ = gtk_label_new("");
-    gtk_style_context_add_class(gtk_widget_get_style_context(loadingLogLabel_), "dim-label");
     gtk_label_set_ellipsize(GTK_LABEL(loadingLogLabel_), PANGO_ELLIPSIZE_END);
     gtk_label_set_xalign(GTK_LABEL(loadingLogLabel_), 0.0f);
     gtk_widget_set_halign(loadingLogLabel_, GTK_ALIGN_FILL);

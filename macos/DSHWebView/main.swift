@@ -2517,7 +2517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         let label = NSTextField(labelWithString: "Starting DeepSeek Harness…")
         label.font = NSFont.systemFont(ofSize: 13)
-        label.textColor = .secondaryLabelColor
+        label.textColor = .labelColor
         label.translatesAutoresizingMaskIntoConstraints = false
         overlay.addSubview(label)
 
