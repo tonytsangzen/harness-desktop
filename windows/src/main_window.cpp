@@ -299,8 +299,11 @@ LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             auto& inst = MainWindow::Instance();
             RECT rc;
             GetClientRect(hwnd, &rc);
-            COLORREF bgColor = inst.DarkMode() ? kOverlayBgDark : kOverlayBg;
-            COLORREF textColor = inst.DarkMode() ? kOverlayTextDark : kOverlayText;
+            // The dsh web UI is dark-themed; keep the startup overlay dark
+            // with light text to match the page it hands off to, regardless
+            // of the app theme.
+            COLORREF bgColor = kOverlayBgDark;
+            COLORREF textColor = kOverlayTextDark;
             HBRUSH bg = CreateSolidBrush(bgColor);
             FillRect(dc, &rc, bg);
             DeleteObject(bg);

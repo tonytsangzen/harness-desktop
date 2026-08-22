@@ -320,10 +320,24 @@ void MainWindow::BuildUi() {
                                      : "download-started";
     g_signal_connect(webContext, downloadSignal, G_CALLBACK(OnDownloadStart), this);
 
-    // Loading overlay (spinner while the server / first page comes up).
+    // Loading overlay (spinner while the server / first page comes up). The
+    // dsh web UI is dark-themed, so the startup screen is pinned dark with
+    // light text to match the page it hands off to (independent of the GTK
+    // theme).
     GtkWidget* overlay = gtk_overlay_new();
     gtk_box_pack_start(GTK_BOX(vbox), overlay, TRUE, TRUE, 0);
     gtk_container_add(GTK_CONTAINER(overlay), webview_);
+    gtk_widget_set_name(overlay, "dsh-loading-overlay");
+    GtkCssProvider* loadingCss = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(
+        loadingCss,
+        "#dsh-loading-overlay { background-color: #1e1e1e; }"
+        "#dsh-loading-overlay spinner { color: #e8e8e8; }"
+        "#dsh-loading-overlay label { color: #e8e8e8; }",
+        -1, nullptr);
+    gtk_style_context_add_provider(gtk_widget_get_style_context(overlay),
+                                   GTK_STYLE_PROVIDER(loadingCss),
+                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 
     loadingOverlay_ = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
     gtk_widget_set_halign(loadingOverlay_, GTK_ALIGN_CENTER);

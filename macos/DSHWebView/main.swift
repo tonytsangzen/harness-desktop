@@ -1442,6 +1442,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         applyTheme()
         buildMenu()
         buildWindow()
+        // The first applyTheme() ran before the window/webView existed, so
+        // their appearance was never set; propagate the theme again now that
+        // they exist (otherwise the whole window — including the loading
+        // overlay — renders with the system appearance instead of the app's).
+        applyTheme()
         ensureNodeRuntime()
         // Debug/demo hook: `DSHWebView --plugins` opens the plugins manager
         // window right away (also used by the smoke test).
@@ -2502,42 +2507,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     // MARK: - Loading overlay
 
-    /// Background that re-resolves the window background color whenever the
-    /// effective appearance changes. `NSColor.cgColor` bakes the color in at
-    /// assignment time, so a plain `layer?.backgroundColor` would not follow
-    /// the app theme (e.g. system light + app dark, or a theme switch).
-    private final class ThemeAwareBackgroundView: NSView {
-        override func viewDidChangeEffectiveAppearance() {
-            super.viewDidChangeEffectiveAppearance()
-            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        }
-    }
-
     private func showLoadingOverlay(over container: NSView) {
-        let overlay = ThemeAwareBackgroundView(frame: container.bounds)
+        // The dsh web UI is dark-themed; keep the startup screen dark too so
+        // it matches the page it hands off to, regardless of the system or
+        // app appearance. (Light text on a fixed dark background.)
+        let overlay = NSView(frame: container.bounds)
         overlay.autoresizingMask = [.width, .height]
         overlay.wantsLayer = true
-        overlay.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        overlay.layer?.backgroundColor =
+            NSColor(calibratedRed: 0.118, green: 0.118, blue: 0.118, alpha: 1).cgColor
 
         let spinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 32, height: 32))
         spinner.style = .spinning
         spinner.isIndeterminate = true
         spinner.controlSize = .regular
+        // Force the light appearance so the spinner stays visible on the
+        // fixed dark background in light mode too.
+        spinner.appearance = NSAppearance(named: .darkAqua)
         spinner.translatesAutoresizingMaskIntoConstraints = false
         overlay.addSubview(spinner)
 
         let label = NSTextField(labelWithString: "Starting DeepSeek Harness…")
         label.font = NSFont.systemFont(ofSize: 13)
-        label.textColor = .labelColor
+        label.textColor = NSColor(calibratedWhite: 0.91, alpha: 1)
         label.translatesAutoresizingMaskIntoConstraints = false
         overlay.addSubview(label)
 
         // Last server log line, pinned to the bottom of the startup screen
-        // (single line, truncated on the right). Primary color so it stays
-        // readable in both light and dark mode.
+        // (single line, truncated on the right). Light monospaced text on the
+        // dark background, like a terminal.
         let logLabel = NSTextField(labelWithString: "")
         logLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
-        logLabel.textColor = .labelColor
+        logLabel.textColor = NSColor(calibratedWhite: 0.82, alpha: 1)
         logLabel.lineBreakMode = .byTruncatingTail
         logLabel.translatesAutoresizingMaskIntoConstraints = false
         overlay.addSubview(logLabel)
