@@ -2502,8 +2502,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
     // MARK: - Loading overlay
 
+    /// Background that re-resolves the window background color whenever the
+    /// effective appearance changes. `NSColor.cgColor` bakes the color in at
+    /// assignment time, so a plain `layer?.backgroundColor` would not follow
+    /// the app theme (e.g. system light + app dark, or a theme switch).
+    private final class ThemeAwareBackgroundView: NSView {
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        }
+    }
+
     private func showLoadingOverlay(over container: NSView) {
-        let overlay = NSView(frame: container.bounds)
+        let overlay = ThemeAwareBackgroundView(frame: container.bounds)
         overlay.autoresizingMask = [.width, .height]
         overlay.wantsLayer = true
         overlay.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
