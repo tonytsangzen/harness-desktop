@@ -70,8 +70,11 @@ std::vector<std::wstring> DrainLogFile(const std::wstring& path, std::streamoff&
         pending = pending.substr(pending.size() > 4096 ? pending.size() - 4096 : 0);
     }
     pending += chunk;
+    // Split on newlines *and* carriage returns: npm's progress redraws use \r
+    // without newlines, so each progress frame becomes a line and the overlay
+    // shows the latest frame instead of stalling.
     size_t nl;
-    while ((nl = pending.find('\n')) != std::string::npos) {
+    while ((nl = pending.find_first_of("\n\r")) != std::string::npos) {
         std::string line = pending.substr(0, nl);
         pending.erase(0, nl + 1);
         if (!line.empty() && line.back() == '\r') line.pop_back();

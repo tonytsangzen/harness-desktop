@@ -707,6 +707,11 @@ bool MainWindow::DrainServerLogs() {
     } else if (!logPending_.empty()) {
         last = logPending_;
     }
+    // Keep only the segment after the last newline or carriage return — npm's
+    // progress redraws use \r without newlines, so the latest progress frame
+    // (not the whole accumulated \r string) is what should be shown.
+    auto lastSep = last.find_last_of("\n\r");
+    if (lastSep != std::string::npos) last = last.substr(lastSep + 1);
     while (!last.empty() && (last.back() == '\n' || last.back() == '\r')) {
         last.pop_back();
     }

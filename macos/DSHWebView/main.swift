@@ -2522,10 +2522,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         overlay.addSubview(label)
 
         // Last server log line, pinned to the bottom of the startup screen
-        // (single line, truncated on the right).
+        // (single line, truncated on the right). Primary color so it stays
+        // readable in both light and dark mode.
         let logLabel = NSTextField(labelWithString: "")
         logLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
-        logLabel.textColor = .secondaryLabelColor
+        logLabel.textColor = .labelColor
         logLabel.lineBreakMode = .byTruncatingTail
         logLabel.translatesAutoresizingMaskIntoConstraints = false
         overlay.addSubview(logLabel)
@@ -2548,17 +2549,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     }
 
     /// Keep only the last log line visible on the startup screen: append to a
-    /// rolling tail, then show the text after the last newline.
+    /// rolling tail, then show the segment after the last newline *or* the
+    /// last carriage return — npm's progress redraws use \r without newlines,
+    /// so the latest progress frame is what should be shown.
     private func handleServerLog(_ text: String) {
         pendingLogTail += text
         if pendingLogTail.count > 8192 {
             pendingLogTail = String(pendingLogTail.suffix(4096))
         }
-        let lastLine = pendingLogTail
-            .split(separator: "\n", omittingEmptySubsequences: false)
+        let lastSegment = pendingLogTail
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
             .last
             .map(String.init) ?? ""
-        let trimmed = lastLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = lastSegment.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         DispatchQueue.main.async { [weak self] in
             self?.loadingLogLabel?.stringValue = trimmed
