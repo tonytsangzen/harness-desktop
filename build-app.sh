@@ -8,7 +8,7 @@ cd "$(dirname "$0")"
 APP_NAME="DSHWebView"
 DISPLAY_NAME="DeepSeek Harness"
 BUNDLE_ID="com.deepvisus.harness-desktop"
-VERSION="${VERSION:-1.1.7}"
+VERSION="${VERSION:-1.1.8}"
 
 # Architectures to ship. Build a universal (fat) binary so one .app supports
 # both Apple Silicon (arm64) and Intel (x86_64) Macs.
@@ -63,7 +63,7 @@ rm -f "${APP_DIR}/Contents/Resources/bridge/package-lock.json"
 node mobile/bridge/prune.mjs "${APP_DIR}/Contents/Resources/bridge"
 
 # Write Info.plist with the resolved version stamped in.
-sed -e "s|<string>1.1.7</string>|<string>${VERSION}</string>|g" Info.plist \
+sed -e "s|<string>1.1.8</string>|<string>${VERSION}</string>|g" Info.plist \
     > "${APP_DIR}/Contents/Info.plist"
 
 # 3. Codesign ad-hoc so Gatekeeper doesn't complain when launched locally.
