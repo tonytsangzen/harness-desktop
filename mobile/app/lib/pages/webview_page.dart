@@ -88,6 +88,15 @@ class _WebviewPageState extends State<WebviewPage> {
   WebViewController _buildController() {
     return WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      // Old Android system WebViews (pre-Chrome 116) lack AbortSignal.any /
+      // AbortSignal.timeout, which the dsh UI calls (e.g. collecting agent
+      // messages); polyfill them at document start, before page scripts run.
+      ..addUserScript(
+        UserScript(
+          source: _abortSignalPolyfill,
+          injectionTime: UserScriptInjectionTime.atDocumentStart,
+        ),
+      )
       ..setBackgroundColor(Colors.white)
       ..setOnConsoleMessage((message) {
         print('[webview] ${message.level}: ${message.message}');
@@ -238,4 +247,41 @@ class _WebviewPageState extends State<WebviewPage> {
                 ),
     );
   }
+
+  /// Injected at document start so page scripts never see a missing
+  /// AbortSignal.any/timeout on older Android system WebViews (pre-Chrome
+  /// 116). The dsh UI calls these when collecting agent messages; without the
+  /// polyfill the button fails with "AbortSignal.any is not a function".
+  static const String _abortSignalPolyfill = r'''
+(function () {
+  try {
+    if (typeof AbortSignal !== 'undefined' && !AbortSignal.any) {
+      AbortSignal.any = function (signals) {
+        var c = new AbortController();
+        signals = signals || [];
+        for (var i = 0; i < signals.length; i++) {
+          var s = signals[i];
+          if (!s || s.aborted) {
+            c.abort(s && s.reason);
+            return c.signal;
+          }
+          s.addEventListener('abort', function () {
+            c.abort(this.reason);
+          }, { once: true });
+        }
+        return c.signal;
+      };
+    }
+    if (typeof AbortSignal !== 'undefined' && !AbortSignal.timeout) {
+      AbortSignal.timeout = function (ms) {
+        var c = new AbortController();
+        setTimeout(function () {
+          c.abort(new DOMException('The operation timed out.', 'TimeoutError'));
+        }, ms);
+        return c.signal;
+      };
+    }
+  } catch (e) { /* never break the page */ }
+})();
+''';
 }
