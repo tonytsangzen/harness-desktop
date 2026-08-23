@@ -98,11 +98,26 @@ class WebProxy {
         headers: headers,
         body: bodyBytes,
       );
-      final respBody = r.bodyB64.isNotEmpty ? base64Decode(r.bodyB64) : const <int>[];
+      var respBody = r.bodyB64.isNotEmpty ? base64Decode(r.bodyB64) : const <int>[];
+      var respHeaders = r.headers;
+      // Inject the AbortSignal polyfill into the HTML entry document (only
+      // when it is uncompressed text/html). Old Android system WebViews
+      // (pre-Chrome 116) lack AbortSignal.any/timeout, which the dsh UI calls
+      // when collecting agent messages; injecting here — before any page
+      // script runs — fixes it for every WebView, no user-script API needed.
+      if (!cacheable && r.status == 200 && respBody.isNotEmpty) {
+        final injected = _injectAbortSignalPolyfill(respBody);
+        if (injected != null) {
+          respBody = injected;
+          respHeaders = Map<String, String>.from(r.headers)
+            ..remove('content-length')
+            ..remove('Content-Length');
+        }
+      }
       if (cacheable && r.status == 200) {
         _store(fullPath, r.status, r.headers, respBody);
       }
-      _serveCached(req, _CachedResponse(r.status, r.headers, respBody));
+      _serveCached(req, _CachedResponse(r.status, respHeaders, respBody));
     } catch (e) {
       print('[dsh] proxy error: $e');
       req.response.statusCode = 502;
@@ -143,6 +158,58 @@ class WebProxy {
       req.response.add(r.body);
     }
   }
+
+  /// Returns the HTML with the AbortSignal polyfill script inserted right
+  /// after `<head>` (or at the very start when no head tag is found), or null
+  /// when the body is not HTML. The script runs before any deferred/module
+  /// page script, so old WebViews see AbortSignal.any/timeout defined.
+  List<int>? _injectAbortSignalPolyfill(List<int> html) {
+    final text = utf8.decode(html, allowMalformed: true);
+    if (!text.contains('<html') && !text.contains('<head') &&
+        !RegExp(r'<!doctype\s+html', caseSensitive: false).hasMatch(text)) {
+      return null;
+    }
+    const script = '<script>${_abortSignalPolyfillJs}</script>';
+    final headIdx = text.indexOf('<head');
+    final insertAt = headIdx >= 0 ? headIdx + 5 : 0;
+    final injected = text.substring(0, insertAt) + script + text.substring(insertAt);
+    return utf8.encode(injected);
+  }
+
+  /// Polyfill for AbortSignal.any / AbortSignal.timeout (Chrome 116+).
+  /// Injected into the HTML document before page scripts run.
+  static const String _abortSignalPolyfillJs = r'''
+(function () {
+  try {
+    if (typeof AbortSignal !== 'undefined' && !AbortSignal.any) {
+      AbortSignal.any = function (signals) {
+        var c = new AbortController();
+        signals = signals || [];
+        for (var i = 0; i < signals.length; i++) {
+          var s = signals[i];
+          if (!s || s.aborted) {
+            c.abort(s && s.reason);
+            return c.signal;
+          }
+          s.addEventListener('abort', function () {
+            c.abort(this.reason);
+          }, { once: true });
+        }
+        return c.signal;
+      };
+    }
+    if (typeof AbortSignal !== 'undefined' && !AbortSignal.timeout) {
+      AbortSignal.timeout = function (ms) {
+        var c = new AbortController();
+        setTimeout(function () {
+          c.abort(new DOMException('The operation timed out.', 'TimeoutError'));
+        }, ms);
+        return c.signal;
+      };
+    }
+  } catch (e) { /* never break the page */ }
+})();
+''';
 
   void _handleWs(HttpRequest req) {
     WebSocketTransformer.upgrade(req).then((ws) {
