@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+## [1.1.9] - 2026-08-22
+
+### 修复
+
+- **Android 旧 WebView 上「收集」消息报错**：dsh 网页调用 `AbortSignal.any()`（Chrome 116+ 才有），旧系统 WebView 上收集/发送消息报 `AbortSignal.any is not a function`。手机端现在在页面加载前注入 polyfill（`AbortSignal.any` + `AbortSignal.timeout`）
+
 ## [1.1.8] - 2026-08-22
 
 ### 优化

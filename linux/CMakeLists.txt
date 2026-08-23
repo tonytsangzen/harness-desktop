@@ -7,7 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # App version shown in the About dialog (override at release time, e.g.
 # -DAPP_VERSION=1.1.1).
-set(APP_VERSION "1.1.8" CACHE STRING "App version shown in About")
+set(APP_VERSION "1.1.9" CACHE STRING "App version shown in About")
 
 # ---- Dependencies (system WebKitGTK = the Linux webview, like WKWebView /
 # WebView2 on the other platforms) ----
