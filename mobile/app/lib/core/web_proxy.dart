@@ -160,9 +160,12 @@ class WebProxy {
   }
 
   /// Returns the HTML with the AbortSignal polyfill script inserted right
-  /// after `<head>` (or at the very start when no head tag is found), or null
-  /// when the body is not HTML. The script runs before any deferred/module
-  /// page script, so old WebViews see AbortSignal.any/timeout defined.
+  /// after the `<head>` open tag (or at the very start when no head tag is
+  /// found), or null when the body is not HTML. The script runs before any
+  /// deferred/module page script, so old WebViews see AbortSignal.any/timeout
+  /// defined. Insertion must land *after* the head tag's closing `>` — going
+  /// between `<head` and `>` corrupts the markup and the script shows up as
+  /// visible text.
   List<int>? _injectAbortSignalPolyfill(List<int> html) {
     final text = utf8.decode(html, allowMalformed: true);
     if (!text.contains('<html') && !text.contains('<head') &&
@@ -170,8 +173,12 @@ class WebProxy {
       return null;
     }
     const script = '<script>${_abortSignalPolyfillJs}</script>';
+    int insertAt = 0;
     final headIdx = text.indexOf('<head');
-    final insertAt = headIdx >= 0 ? headIdx + 5 : 0;
+    if (headIdx >= 0) {
+      final gt = text.indexOf('>', headIdx);
+      insertAt = gt >= 0 ? gt + 1 : headIdx + 5;
+    }
     final injected = text.substring(0, insertAt) + script + text.substring(insertAt);
     return utf8.encode(injected);
   }
