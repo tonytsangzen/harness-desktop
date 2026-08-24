@@ -105,13 +105,20 @@ class WebProxy {
       // (pre-Chrome 116) lack AbortSignal.any/timeout, which the dsh UI calls
       // when collecting agent messages; injecting here — before any page
       // script runs — fixes it for every WebView, no user-script API needed.
-      if (!cacheable && r.status == 200 && respBody.isNotEmpty) {
+      if (!cacheable && r.status == 200 && respBody.isNotEmpty &&
+          _isHtmlResponse(r.headers)) {
         final injected = _injectAbortSignalPolyfill(respBody);
         if (injected != null) {
           respBody = injected;
           respHeaders = Map<String, String>.from(r.headers)
             ..remove('content-length')
-            ..remove('Content-Length');
+            ..remove('Content-Length')
+            // Never let the WebView cache an injected document: a stale
+            // cached copy from a buggy build (corrupted by a bad injection)
+            // would keep showing broken markup forever.
+            ..remove('cache-control')
+            ..remove('Cache-Control')
+            ..['cache-control'] = 'no-store';
         }
       }
       if (cacheable && r.status == 200) {
@@ -157,6 +164,20 @@ class WebProxy {
     if (r.body.isNotEmpty) {
       req.response.add(r.body);
     }
+  }
+
+  /// Only ever inject into real HTML documents. Plugin/client bundles are
+  /// JavaScript and may contain `<head`/`<html` inside string literals — the
+  /// earlier body-sniffing heuristic corrupted them (a bundle starting with
+  /// `<script>…</script>` fails to load: "loaded without registering …").
+  bool _isHtmlResponse(Map<String, String> headers) {
+    for (final e in headers.entries) {
+      if (e.key.toLowerCase() == 'content-type' &&
+          e.value.toLowerCase().contains('text/html')) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /// Returns the HTML with the AbortSignal polyfill script inserted right
