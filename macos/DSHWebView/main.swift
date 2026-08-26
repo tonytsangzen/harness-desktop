@@ -2211,7 +2211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
            pinText.count == 6, pinText.allSatisfy({ $0.isNumber }) {
             if isWeakPin(pinText) {
                 let alert = NSAlert()
-                alert.messageText = s.settings
+                alert.messageText = "配对 PIN"
                 alert.informativeText = "该 PIN 过于简单，无法使用（例如 000000、123456、连续或相同数字）。请换一个。"
                 alert.runModal()
                 NSApp.stopModal()
