@@ -35,11 +35,26 @@ class _WebviewPageState extends State<WebviewPage> {
   String? _error;
   bool _lanMode = false; // currently loading the desktop directly on the LAN
   bool _fellBack = false; // already fell back from LAN to the relay tunnel
+  bool _wasOnline = true; // last observed tunnel status (for edge detection)
 
   @override
   void initState() {
     super.initState();
+    _wasOnline = widget.state.connected;
+    widget.state.addListener(_onStateChanged);
     _bootstrap();
+  }
+
+  void _onStateChanged() {
+    final online = widget.state.connected;
+    // The relay tunnel just came back: reload so the page recovers from the
+    // requests that failed while it was down.
+    if (online && !_wasOnline && !_lanMode && _controller != null) {
+      print('[dsh] tunnel restored, reloading webview');
+      _controller!.reload();
+    }
+    _wasOnline = online;
+    if (mounted) setState(() {});
   }
 
   Future<void> _bootstrap() async {
@@ -124,6 +139,7 @@ class _WebviewPageState extends State<WebviewPage> {
 
   @override
   void dispose() {
+    widget.state.removeListener(_onStateChanged);
     ForegroundService.stop();
     _proxy?.close();
     _lanBackend?.dispose();
@@ -209,33 +225,52 @@ class _WebviewPageState extends State<WebviewPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _error != null
-          ? Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(_error!,
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                            color: Theme.of(context).colorScheme.error)),
-                    const SizedBox(height: 16),
-                    FilledButton.icon(
-                      onPressed: _retry,
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('重试'),
-                    ),
-                  ],
-                ),
+      body: ListenableBuilder(
+        listenable: widget.state,
+        builder: (context, _) {
+          // While the relay tunnel is down (and auto-reconnect is running),
+          // show a "reconnecting" overlay instead of a dead page.
+          if (!_lanMode && !widget.state.connected && _controller != null) {
+            return const Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('连接已断开，正在重新连接…'),
+                ],
               ),
-            )
-          : _controller == null
-              ? const Center(child: CircularProgressIndicator())
-              : SafeArea(
-                  // Keep the web view below the system status bar / notch.
-                  child: WebViewWidget(controller: _controller!),
-                ),
+            );
+          }
+          return _error != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(_error!,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                                color: Theme.of(context).colorScheme.error)),
+                        const SizedBox(height: 16),
+                        FilledButton.icon(
+                          onPressed: _retry,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('重试'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : _controller == null
+                  ? const Center(child: CircularProgressIndicator())
+                  : SafeArea(
+                      // Keep the web view below the system status bar / notch.
+                      child: WebViewWidget(controller: _controller!),
+                    );
+        },
+      ),
     );
   }
 }

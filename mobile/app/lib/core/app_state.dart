@@ -4,6 +4,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -37,6 +38,12 @@ class AppState extends ChangeNotifier {
   /// Last raw session.list reply (truncated) — shown on the sessions page
   /// when the list is empty, for on-device diagnosis.
   String? debugLastReply;
+
+  /// Auto-reconnect state for the relay tunnel: when the socket drops
+  /// (network switch, relay hiccup, Android backgrounding) the tunnel
+  /// re-attaches with exponential backoff instead of dying silently.
+  Timer? _reconnectTimer;
+  int _reconnectAttempt = 0;
 
   /// Load saved connections (does not auto-connect).
   Future<void> init() async {
@@ -203,12 +210,18 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _attach(String relayBase, String token) async {
+    _closing = false;
     final c = RelayClient(relayBase: relayBase, sessionToken: token);
     c.onStatus = (online) {
       _log('tunnel status online=$online');
       connected = online;
       notifyListeners();
-      if (online) refreshSessions();
+      if (online) {
+        _reconnectAttempt = 0;
+        refreshSessions();
+      } else {
+        _scheduleReconnect(c, relayBase, token);
+      }
     };
     c.onFatal = (msg) {
       _log('tunnel FATAL: $msg');
@@ -261,12 +274,38 @@ class AppState extends ChangeNotifier {
 
   /// Disconnect the current tunnel without removing the saved connection.
   Future<void> disconnect() async {
+    _closing = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempt = 0;
     client?.close();
     client = null;
     connected = false;
     sessions = const [];
     notifyListeners();
   }
+
+  /// Re-attach the relay tunnel after a drop, with exponential backoff
+  /// (2s → 4s → 8s → 16s → 30s cap). Only runs while this connection is
+  /// still the active one and the user hasn't disconnected.
+  void _scheduleReconnect(RelayClient c, String relayBase, String token) {
+    if (_reconnectTimer != null) return;
+    if (client != c || _closing) return;
+    final attempt = _reconnectAttempt++;
+    final delay = [2, 4, 8, 16, 30][math.min(attempt, 4)];
+    _log('schedule reconnect in ${delay}s (attempt $attempt)');
+    _reconnectTimer = Timer(Duration(seconds: delay), () {
+      _reconnectTimer = null;
+      if (client != c || _closing) return;
+      _log('reconnecting tunnel…');
+      _attach(relayBase, token).catchError((Object e) {
+        _log('reconnect failed: $e');
+        _scheduleReconnect(c, relayBase, token);
+      });
+    });
+  }
+
+  bool _closing = false;
 
   /// Ask the desktop dsh which session is currently active (running=true).
   /// Returns its id, or null when there is none / on any failure.

@@ -32,6 +32,9 @@ class WebProxy {
   final Map<String, _CachedResponse> _cache = {};
   int _cacheBytes = 0;
 
+  /// Open raw mux channels streaming HTTP SSE into WebView responses.
+  final Set<String> _sseChannels = {};
+
   int get port => _server?.port ?? 0;
 
   bool _isCacheable(String method, String path) =>
@@ -54,6 +57,10 @@ class WebProxy {
       client.closeSse(ch);
     }
     _wsByChannel.clear();
+    for (final ch in _sseChannels) {
+      client.closeSse(ch);
+    }
+    _sseChannels.clear();
     _cache.clear();
     _cacheBytes = 0;
     await _server?.close(force: true);
@@ -66,6 +73,13 @@ class WebProxy {
     if (upgrade == 'websocket' &&
         (path == '/api/events.mux' || path == '/api/events.host')) {
       _handleWs(req);
+      return;
+    }
+    // /plugins/events is an HTTP SSE stream that never ends. Tunneled as a
+    // plain HTTP request it stalls until the 30s relay timeout (one long
+    // stall on every connect). Stream it through a raw mux channel instead.
+    if (path == '/plugins/events') {
+      _handleSseStream(req);
       return;
     }
     try {
@@ -119,6 +133,10 @@ class WebProxy {
             ..remove('cache-control')
             ..remove('Cache-Control')
             ..['cache-control'] = 'no-store';
+          // Cache the injected document in the proxy LRU too: the entry page
+          // is fetched on every launch and the relay downlink is slow, so
+          // serving it from memory makes re-entry near-instant.
+          _store(fullPath, r.status, respHeaders, respBody);
         }
       }
       if (cacheable && r.status == 200) {
@@ -264,6 +282,40 @@ class WebProxy {
       req.response.write('ws proxy error: $e');
       req.response.close();
     });
+  }
+
+  /// Stream an HTTP SSE endpoint (e.g. /plugins/events) through a raw mux
+  /// channel instead of buffering it as a one-shot HTTP response. The
+  /// response stays open and each tunneled chunk is written as it arrives.
+  void _handleSseStream(HttpRequest req) {
+    req.response.statusCode = 200;
+    req.response.headers.contentType = ContentType('text', 'event-stream');
+    req.response.headers.set('cache-control', 'no-store');
+    // Dart buffers the headers until the first write or close; an idle SSE
+    // stream may never emit data, so flush the 200 now — otherwise the
+    // WebView waits for the response headers forever and the page never
+    // finishes loading.
+    req.response.flush();
+    final ch = client.openSseRaw(
+      req.uri.path,
+      onData: (data) {
+        try {
+          req.response.add(utf8.encode(data));
+        } catch (_) {
+          // Response already closed; the channel teardown handles cleanup.
+        }
+      },
+      onClose: (_) {
+        try {
+          req.response.close();
+        } catch (_) {}
+      },
+    );
+    _sseChannels.add(ch);
+    req.response.done.whenComplete(() {
+      client.closeSse(ch);
+      _sseChannels.remove(ch);
+    }).catchError((Object _) {});
   }
 }
 

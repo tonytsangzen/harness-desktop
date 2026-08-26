@@ -1,5 +1,18 @@
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-25
+
+### 修复
+
+- **AbortSignal polyfill 误伤插件**：polyfill 注入曾按内容特征判断 HTML，把含 `<head`/`<html` 字符串的插件 JS bundle 也注入破坏（"Failed to load plugins / loaded without registering"）。现在**只对 `content-type: text/html` 的响应注入**，且注入位置在 `<head>` 闭合标签之后，注入文档强制 `no-store` 防旧缓存
+- **连接后页面挂起**：`/plugins/events`（HTTP SSE 长连接）曾被当作一次性 HTTP 请求，隧道等待完整响应直到 30s 超时；现在**流式转发**（桥接端 + 手机端均支持，LAN 直连同样生效），页面不再等待
+- **隧道掉线后无恢复**：relay 隧道断线后现在**自动重连**（指数退避 2s→30s），断线时显示「正在重新连接…」，恢复后自动刷新页面
+
+### 优化
+
+- **连接提速**：relay 下行大资源 **gzip 压缩**（传输量约 -70%）；注入后的首页 HTML 进入手机内存缓存，二次进入秒开
+- **relay 服务器自定义**：设置中可自定义 relay 服务器地址（开关开启时优先），关闭或未设置时使用默认 `https://relay.deepvisus.top`
+
 ## [1.1.9] - 2026-08-22
 
 ### 修复

@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { parseArgs } from "node:util";
 import { createServer, request as httpRequest } from "node:http";
+import { gzipSync } from "node:zlib";
 import { WebSocketServer } from "ws";
 
 const args = parseArgs({
@@ -122,8 +123,34 @@ const lanServer = createServer((req, res) => {
 const lanWss = new WebSocketServer({ server: lanServer });
 lanWss.on("connection", (client, req) => {
   const path = (req.url || "/").split("?")[0];
-  if (!path.startsWith("/api/events.")) {
+  if (!path.startsWith("/api/events.") && path !== "/plugins/events") {
     client.close(1008, "not allowed");
+    return;
+  }
+  if (path === "/plugins/events") {
+    // HTTP SSE endpoint streamed over the phone's WebSocket: fetch dsh and
+    // forward each chunk as a WS message so the phone's proxy can write it
+    // into the WebView response (a plain HTTP request would stall forever).
+    const ctl = new AbortController();
+    client.on("close", () => ctl.abort());
+    client.on("error", () => ctl.abort());
+    fetch(`${DSH_BASE}${req.url || ""}`, { signal: ctl.signal })
+      .then(async (resp) => {
+        if (!resp.ok || !resp.body) {
+          try { client.close(1011, "upstream failed"); } catch { /* ignore */ }
+          return;
+        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const text = decoder.decode(value, { stream: true });
+          if (text && client.readyState === 1) client.send(text);
+        }
+        try { client.close(); } catch { /* ignore */ }
+      })
+      .catch(() => { try { client.close(1011, "upstream failed"); } catch { /* ignore */ } });
     return;
   }
   const wsUrl = DSH_BASE.replace(/^http/, "ws") + (req.url || "");
@@ -313,6 +340,21 @@ async function proxyHttp(method, path, headers, bodyBase64) {
     if (ct) replyHeaders["content-type"] = ct;
     const loc = resp.headers.get("location");
     if (loc) replyHeaders.location = loc;
+    // The relay downlink (server -> phone) is often bandwidth-starved
+    // (e.g. a 1 Mbps egress cap); compress large bodies so the phone's
+    // WebView (which decodes content-encoding itself) receives far fewer
+    // bytes. Skip tiny payloads and already-compressed responses.
+    if (buf.length > 2048 && !/^image\//.test(ct || "") && buf.length > 0 &&
+        !replyHeaders["content-encoding"]) {
+      const gz = gzipSync(buf, { level: 6 });
+      if (gz.length < buf.length * 0.9) {
+        replyHeaders["content-encoding"] = "gzip";
+        return {
+          status: resp.status, headers: replyHeaders,
+          body: gz.toString("base64"),
+        };
+      }
+    }
     return { status: resp.status, headers: replyHeaders, body: buf.toString("base64") };
   } catch (err) {
     return {
@@ -333,25 +375,58 @@ async function proxyHttp(method, path, headers, bodyBase64) {
 async function handleSseOpen(frame) {
   const raw = frame.body?.raw === true;
   if (raw) {
-    const wsUrl = DSH_BASE.replace(/^http/, "ws") + frame.path;
-    let dshWs;
-    try {
-      dshWs = new WebSocket(wsUrl);
-    } catch (err) {
-      send({ v: 1, type: "sse-close", channel: frame.channel, body: { reason: "error" } });
+    if (frame.path === "/api/events.mux" || frame.path === "/api/events.host") {
+      const wsUrl = DSH_BASE.replace(/^http/, "ws") + frame.path;
+      let dshWs;
+      try {
+        dshWs = new WebSocket(wsUrl);
+      } catch (err) {
+        send({ v: 1, type: "sse-close", channel: frame.channel, body: { reason: "error" } });
+        return;
+      }
+      sseStreams.set(frame.channel, dshWs);
+      dshWs.onmessage = (ev) => {
+        if (typeof ev.data === "string") {
+          send({ v: 1, type: "sse-frame", channel: frame.channel, body: { data: ev.data } });
+        }
+      };
+      dshWs.onclose = () => {
+        send({ v: 1, type: "sse-close", channel: frame.channel, body: { reason: "eof" } });
+        sseStreams.delete(frame.channel);
+      };
+      dshWs.onerror = () => { /* onclose follows */ };
       return;
     }
-    sseStreams.set(frame.channel, dshWs);
-    dshWs.onmessage = (ev) => {
-      if (typeof ev.data === "string") {
-        send({ v: 1, type: "sse-frame", channel: frame.channel, body: { data: ev.data } });
+    // Other raw paths (e.g. /plugins/events) are HTTP SSE streams, not
+    // WebSockets: fetch and forward each chunk verbatim so the phone's proxy
+    // can stream them into the WebView response instead of buffering until
+    // the never-ending stream times out (a 30s stall on every connect).
+    const ctl = new AbortController();
+    sseStreams.set(frame.channel, ctl);
+    try {
+      const resp = await fetch(`${DSH_BASE}${frame.path}`, { signal: ctl.signal });
+      if (!resp.ok || !resp.body) {
+        send({ v: 1, type: "sse-close", channel: frame.channel, body: { reason: "error" } });
+        return;
       }
-    };
-    dshWs.onclose = () => {
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        if (text) {
+          send({ v: 1, type: "sse-frame", channel: frame.channel, body: { data: text } });
+        }
+      }
       send({ v: 1, type: "sse-close", channel: frame.channel, body: { reason: "eof" } });
+    } catch (err) {
+      if (err?.name !== "AbortError") {
+        send({ v: 1, type: "sse-close", channel: frame.channel, body: { reason: "error" } });
+      }
+    } finally {
       sseStreams.delete(frame.channel);
-    };
-    dshWs.onerror = () => { /* onclose follows */ };
+    }
     return;
   }
   const ctl = new AbortController();
