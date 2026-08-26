@@ -224,52 +224,62 @@ class _WebviewPageState extends State<WebviewPage> {
 
   @override
   Widget build(BuildContext context) {
+    // Keep the WebView out of any listenable-driven rebuild: rebuilding the
+    // platform view (even with the same controller) on every AppState
+    // notification (session refresh etc.) can drop touch events, making the
+    // page render but clicks do nothing. The reconnecting overlay is layered
+    // on top via Stack instead.
+    final showReconnecting =
+        !_lanMode && !widget.state.connected && _controller != null;
     return Scaffold(
-      body: ListenableBuilder(
-        listenable: widget.state,
-        builder: (context, _) {
-          // While the relay tunnel is down (and auto-reconnect is running),
-          // show a "reconnecting" overlay instead of a dead page.
-          if (!_lanMode && !widget.state.connected && _controller != null) {
-            return const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('连接已断开，正在重新连接…'),
-                ],
-              ),
-            );
-          }
-          return _error != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(_error!,
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                                color: Theme.of(context).colorScheme.error)),
-                        const SizedBox(height: 16),
-                        FilledButton.icon(
-                          onPressed: _retry,
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('重试'),
-                        ),
-                      ],
+      body: Stack(
+        children: [
+          Positioned.fill(
+            child: _error != null
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(_error!,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                  color: Theme.of(context).colorScheme.error)),
+                          const SizedBox(height: 16),
+                          FilledButton.icon(
+                            onPressed: _retry,
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('重试'),
+                          ),
+                        ],
+                      ),
                     ),
+                  )
+                : _controller == null
+                    ? const Center(child: CircularProgressIndicator())
+                    : SafeArea(
+                        // Keep the web view below the system status bar / notch.
+                        child: WebViewWidget(controller: _controller!),
+                      ),
+          ),
+          if (showReconnecting)
+            const Positioned.fill(
+              child: ColoredBox(
+                color: Color(0xE6FFFFFF),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(),
+                      SizedBox(height: 16),
+                      Text('连接已断开，正在重新连接…'),
+                    ],
                   ),
-                )
-              : _controller == null
-                  ? const Center(child: CircularProgressIndicator())
-                  : SafeArea(
-                      // Keep the web view below the system status bar / notch.
-                      child: WebViewWidget(controller: _controller!),
-                    );
-        },
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
