@@ -30,6 +30,11 @@ const args = parseArgs({
     // Stable pairing PIN chosen by the shell (persisted; editable in Settings).
     // When provided the relay keeps it as the host's long-lived PIN.
     pin: { type: "string", default: "" },
+    // Persisted hostToken from a previous registration (shell stores it in
+    // UserDefaults). Lets a bridge restart reconnect by token instead of
+    // re-registering anonymously — the relay refuses anonymous re-registration
+    // of an existing hostId (hijack protection).
+    "host-token": { type: "string", default: "" },
     // LAN direct-connect port: the phone prefers loading the dsh web straight
     // from this machine when it can reach it, and falls back to the relay.
     "lan-port": { type: "string", default: "13080" },
@@ -47,6 +52,9 @@ const RELAY = (() => {
 const DSH_BASE = `http://${args.values["dsh-host"]}:${args.values["dsh-port"]}`;
 const HOST_NAME = args.values["host-name"];
 const DEVICE_ID = args.values["device-id"] || "";
+// Seed the in-memory hostToken from the shell-persisted one, so a restart
+// reconnects with `Authorization: Bearer` instead of re-registering.
+let hostToken = args.values["host-token"] || null;
 
 // ---- single-instance guard ------------------------------------------------
 // The shell re-spawns the bridge after an unexpected exit (auto-restart), and
@@ -188,7 +196,6 @@ lanServer.listen(LAN_PORT, "0.0.0.0", () => {
 });
 
 let ws = null;
-let hostToken = null;
 let hostId = null;
 let registered = false;
 let backoff = 1000;
@@ -258,6 +265,9 @@ function sendRegister() {
     body: {
       hostId: DEVICE_ID, hostName: HOST_NAME,
       dshVersion: process.env.DSH_VERSION || "unknown",
+      // Present on re-registration after a relay restart: proves we are the
+      // original owner of this hostId (relay rejects existing hosts otherwise).
+      ...(hostToken ? { token: hostToken } : {}),
       ...(args.values.pin ? { pin: args.values.pin } : {}),
     },
   }));

@@ -28,31 +28,38 @@ Host 连上 `/relay/v1/host` 后，第一条消息必须是注册：
 
 ```json
 { "v": 1, "type": "control", "kind": "register",
-  "body": { "hostId": "8621742451123", "hostName": "Tony-MBP", "dshVersion": "0.1.0-rc.6",
-            "pin": "814304" } }
+  "body": { "hostId": "h_…", "hostName": "Tony-MBP", "dshVersion": "0.1.0-rc.6",
+            "pin": "814304", "token": "ht_…" } }
 ```
 
-- `hostId`：**壳生成的 13 位设备 ID**（由设备信息派生的稳定随机数，见 §2.5）。首次注册即携带，中继将其作为 Host 标识（未知 ID 直接建号，已知 ID 复用并刷新 token/PIN）。
-- `pin`（可选）：**固定配对 PIN**。壳在首次启动随机生成并持久化（UserDefaults），每次注册都携带；中继将其作为该 Host 的长期 PIN（`pinExpiresAt: 0`，无过期、可重复使用，配对失败 5 次锁 15 分钟）。不带 `pin` 且 Host 已有固定 PIN 时保持原值；从未设置过则回退短时效 PIN。可在「设置…」中修改。
+- `hostId`：**壳生成的高熵设备 ID**（32 字节 CSPRNG，`h_` 前缀 + 64 位 hex，UserDefaults 持久化，见 §2.5）。首次注册即携带，中继将其作为 Host 标识（未知 ID 直接建号，已知 ID 复用并刷新 token/PIN）。
+- `pin`（可选）：**固定配对 PIN**。壳在首次启动随机生成并持久化（UserDefaults），每次注册都携带；中继将其作为该 Host 的长期 PIN（`pinExpiresAt: 0`，无过期、可重复使用，配对失败 5 次锁 15 分钟）。不带 `pin` 且 Host 已有固定 PIN 时保持原值；从未设置过则回退短时效 PIN。可在「设置…」中修改。**弱 PIN 会被拒绝**（`000000`、`123456`、连续/相同数字等，见 §5 `weak-pin`）。
+- `token`（可选）：**上次注册拿到的 hostToken**（壳持久化于 UserDefaults）。**安全约束**：`hostId` 已存在于中继时，注册必须携带有效 `token`，否则中继拒绝（`host-conflict`）——防止任何知道 hostId 的人匿名重注册劫持 Host（踢掉真 bridge、截获设备流量）。全新 hostId（首次注册/中继重启后）无此要求。
 
 中继响应：
 
 ```json
 { "v": 1, "type": "control", "kind": "registered",
-  "body": { "hostId": "8621742451123", "hostToken": "ht_…",
+  "body": { "hostId": "h_…", "hostToken": "ht_…",
              "pin": "814304", "pinExpiresAt": 1755300000000 } }
 ```
 
-- `hostToken`：Host 断线重连时作为 WSS `Authorization: Bearer` 头携带（服务端校验后直接恢复在线，不再二次注册）。
+拒绝响应（同步写入后关闭连接）：
+
+```json
+{ "v": 1, "type": "control", "kind": "register-denied", "code": "host-conflict" }
+```
+
+- `hostToken`：Host 断线重连时作为 WSS `Authorization: Bearer` 头携带（服务端校验后直接恢复在线，不再二次注册）；壳将其持久化（`mobileHostToken`），bridge 重启时经 `--host-token` 传回。
 - `pin`：固定 PIN（壳提供，`pinExpiresAt=0`）或短时效单次 PIN（默认 10 分钟）。**二维码由壳生成**（内容为 `relay://<relay>/pair?device=<hostId>`，不含 PIN——PIN 需在电脑端查看）。
-- 重复注册（已在线 hostId 再连）：旧连接被踢（409 `host-replaced`），新连接接管。
+- 重复注册（已在线 hostId 再连）：旧连接被踢（409 `host-replaced`），新连接接管（需有效 token）。
 - Host 端到端（隧道正常时）可随时用控制帧 `{kind:"unregister"}` 主动下线。
 
 ### 2.2 Device 配对（HTTP）
 
 ```
 POST /relay/v1/pair
-{ "deviceId": "8621742451123", "pin": "814304" }
+{ "deviceId": "h_…", "pin": "814304" }
 ```
 
 - `deviceId` 来自电脑端二维码（`device=` 参数）或手动输入的设备码；`pin` 在电脑端显示。
@@ -60,12 +67,12 @@ POST /relay/v1/pair
 成功：
 
 ```json
-{ "hostId": "8621742451123", "deviceId": "d_5a2c…",
+{ "hostId": "h_…", "deviceId": "d_5a2c…",
   "sessionToken": "st_…", "sessionExpiresAt": 1755386400000,
   "refreshToken": "rt_…" }
 ```
 
-错误（HTTP 状态 + 错误码，见 §5）：
+错误（HTTP 状态 + 错误码，见 §5）。**错误码有意统一为 `pair-invalid`**（除限速 `rate-limited` 外），使 pair 端点无法被用来探测 hostId 是否存在、PIN 是否过期或已被消费：
 
 | 情形 | 状态 | code |
 | --- | --- | --- |
@@ -79,9 +86,9 @@ POST /relay/v1/pair
 
 ### 2.3 设备 ID 与二维码（壳生成）
 
-- **设备 ID**：13 位十进制随机数，由壳基于设备信息（macOS `hostname + IOPlatformUUID`；Linux `hostname + /etc/machine-id`；Windows `hostname + MachineGuid`）做 SHA-256 派生（取前 8 字节 mod 10¹³），**跨启动稳定**，作为中继 Host 标识。
-- **二维码内容**（壳端生成，`relay://<relay-host>/pair?device=<13位设备ID>`）：仅含中继地址与设备 ID，**不含 PIN**。手机扫码得到中继地址 + 设备码，PIN 需在电脑端查看输入。
-- 点击「远程连接…」流程：生成设备 ID + 二维码 → spawn bridge（`--device-id <ID>`）连接中继注册 → **注册成功**（收到 registered）才弹出配对窗口（二维码 + PIN + 设备码）；12 秒内未注册成功 → 提示「中继服务器不可用」并停止 bridge。
+- **设备 ID（hostId）**：**32 字节 CSPRNG 随机**（`h_` + 64 位 hex，~256 bits 熵），UserDefaults 持久化，**跨启动稳定**，作为中继 Host 标识。不再由设备信息派生（旧版 13 位数字可从公开机器信息推导，攻击者获知后即可尝试劫持注册）。
+- **二维码内容**（壳端生成，`relay://<relay-host>/pair?device=<hostId>`）：仅含中继地址与设备 ID，**不含 PIN**。手机扫码得到中继地址 + 设备码，PIN 需在电脑端查看输入。
+- 点击「远程连接…」流程：生成设备 ID + 二维码 → spawn bridge（`--device-id <ID>` 连接中继注册）→ **注册成功**（收到 registered）才弹出配对窗口（二维码 + PIN + 设备码）；12 秒内未注册成功 → 提示「中继服务器不可用」并停止 bridge。
 
 ### 2.4 吊销（HTTP）
 
@@ -238,14 +245,13 @@ Device:
 | --- | --- | --- | --- |
 | `unauthorized` | 401 | token 缺失/无效/过期 | App 换 token 重连 |
 | `forbidden` | 403 | 会话已吊销/未绑定 | 重新配对 |
-| `pair-invalid` | 409 | PIN 错误 | 提示重输 |
-| `pair-expired` | 409 | deviceId 未注册/PIN 过期 | 重新在电脑端开启配对 |
-| `pair-used` | 409 | PIN 已消费（单次） | 同上 |
-| `pair-locked` | 409 | PIN 尝试过多被锁 | 15 分钟后重试 |
+| `pair-invalid` | 409 | **统一配对失败码**（PIN 错/已过期/已被消费/设备不存在）——错误码刻意不细分，防止探测 hostId 与 PIN 状态 | 提示重输或重新开启配对 |
+| `host-conflict` | (WSS close) | 匿名重注册已存在的 hostId 被拒（劫持保护） | 用持久化的 hostToken 重连 |
+| `weak-pin` | (WSS close) | 固定 PIN 过于简单被拒 | 在电脑端设置中更换 |
+| `rate-limited` | 429 | 请求过频（pair/register 每 IP 限速） | 退避重试 |
 | `host-offline` | 409 | 目标 Host 不在线 | App 显示离线，自动重试 |
 | `host-replaced` | 409 | 同 Host 新连接顶替 | 旧连接关闭（正常） |
 | `device-limit` | 409 | 绑定设备超限 | 在 Host 端解绑 |
-| `rate-limited` | 429 | 请求过频 | 退避重试 |
 | `unknown-channel` | 404 | 帧 channel 不存在 | 忽略并重连 |
 | `overflow` | — | 队列溢出（隧道层） | 重开 channel |
 | `relay-error` | 500 | 中继内部错误 | 重试，报告 |

@@ -19,6 +19,7 @@ const (
 	SessionTTL      = 24 * time.Hour
 	RefreshTTL      = 30 * 24 * time.Hour
 	MaxDevices      = 64
+	DeviceStaleAfter = 90 * 24 * time.Hour // GC drops devices idle this long
 )
 
 type Host struct {
@@ -32,6 +33,7 @@ type Host struct {
 	PinFails    int             // consecutive wrong fixed-PIN attempts
 	Devices     map[string]bool // deviceId -> bound
 	LockedUntil int64           // unix ms while pair locked
+	LastSeen    int64           // last register (unix ms), for GC of dead hosts
 }
 
 type Pair struct {
@@ -46,6 +48,7 @@ type Device struct {
 	ID        string
 	HostID    string
 	CreatedAt int64
+	LastSeen  int64 // last tunnel connection (unix ms); GC drops stale devices
 }
 
 type Session struct {
@@ -92,15 +95,27 @@ func Hash(tok string) string {
 // non-empty it is honored: an existing host keeps its id (new hostToken + pair
 // ticket), an unknown id creates the host under it. Returns the host and the
 // plaintext hostToken (shown once; only the hash is stored).
-// RegisterHost creates/updates a host. When fixedPin is non-empty it becomes
-// the host's long-lived pairing PIN (returned unchanged on every register);
-// otherwise a fresh short-lived Pair PIN is generated.
-func (s *Store) RegisterHost(id, name, dshVersion, fixedPin string) (*Host, string, string, int64) {
+//
+// Security: re-registering an EXISTING hostId requires a valid hostToken
+// (regToken). Without it the request is refused — otherwise anyone who learns
+// a hostId (QR code, logs) could hijack the host, kick the real bridge and
+// intercept all device traffic. A brand-new hostId (first registration) is
+// always allowed; the bridge persists its hostToken so a restart reconnects
+// with the token instead of re-registering anonymously.
+func (s *Store) RegisterHost(id, name, dshVersion, fixedPin, regToken string) (*Host, string, string, int64, bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if WeakPin(fixedPin) {
+		return nil, "", "", 0, false, "weak-pin"
+	}
+
 	host := s.hosts[id]
-	if host == nil {
+	if host != nil {
+		if regToken == "" || !s.tokenMatchesHost(regToken, host) {
+			return nil, "", "", 0, false, "host-conflict"
+		}
+	} else {
 		if id == "" {
 			id = RandomToken("h_")
 		}
@@ -109,6 +124,7 @@ func (s *Store) RegisterHost(id, name, dshVersion, fixedPin string) (*Host, stri
 	}
 	host.Name = name
 	host.DshVersion = dshVersion
+	host.LastSeen = time.Now().UnixMilli()
 
 	hostToken := RandomToken("ht_")
 	host.TokenHash = Hash(hostToken)
@@ -118,11 +134,11 @@ func (s *Store) RegisterHost(id, name, dshVersion, fixedPin string) (*Host, stri
 		// Shell-provided PIN: stable across registrations, no expiry.
 		host.FixedPin = fixedPin
 		host.Pair = nil
-		return host, hostToken, host.FixedPin, 0
+		return host, hostToken, host.FixedPin, 0, true, ""
 	}
 	if host.FixedPin != "" {
 		// Re-register without a PIN keeps the stable one.
-		return host, hostToken, host.FixedPin, 0
+		return host, hostToken, host.FixedPin, 0, true, ""
 	}
 	pin := randomPin()
 	now := time.Now()
@@ -131,7 +147,57 @@ func (s *Store) RegisterHost(id, name, dshVersion, fixedPin string) (*Host, stri
 		Pin:       pin,
 		ExpiresAt: now.Add(PinTTL).UnixMilli(),
 	}
-	return host, hostToken, pin, host.Pair.ExpiresAt
+	return host, hostToken, pin, host.Pair.ExpiresAt, true, ""
+}
+
+// tokenMatchesHost reports whether token is the current hostToken of host.
+func (s *Store) tokenMatchesHost(token string, host *Host) bool {
+	return host.TokenHash != "" && host.TokenHash == Hash(token)
+}
+
+// WeakPin rejects trivially guessable fixed PINs (all-same digits, ascending /
+// descending runs, common defaults). Returns false for empty (no fixed PIN).
+func WeakPin(pin string) bool {
+	if pin == "" {
+		return false
+	}
+	if len(pin) != 6 {
+		return true
+	}
+	for _, c := range pin {
+		if c < '0' || c > '9' {
+			return true
+		}
+	}
+	// All same digit, e.g. 000000 / 999999.
+	allSame := true
+	for i := 1; i < len(pin); i++ {
+		if pin[i] != pin[0] {
+			allSame = false
+			break
+		}
+	}
+	if allSame {
+		return true
+	}
+	// Ascending / descending runs, e.g. 123456 / 654321.
+	asc, desc := true, true
+	for i := 1; i < len(pin); i++ {
+		if pin[i] != pin[i-1]+1 {
+			asc = false
+		}
+		if pin[i] != pin[i-1]-1 {
+			desc = false
+		}
+	}
+	if asc || desc {
+		return true
+	}
+	switch pin {
+	case "123123", "112233", "121212", "111222", "000001", "123321":
+		return true
+	}
+	return false
 }
 
 // HostByToken resolves a host from its hostToken (reconnect path).
@@ -248,7 +314,8 @@ func (s *Store) SessionByToken(token string) (*Session, bool) {
 	return sess, true
 }
 
-// RefreshSession rotates a session token from a refresh token.
+// RefreshSession rotates a session token from a refresh token. The old session
+// token is invalidated at the same time so a leaked token has no extra window.
 func (s *Store) RefreshSession(refreshToken string) (string, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -261,6 +328,7 @@ func (s *Store) RefreshSession(refreshToken string) (string, string, bool) {
 		return "", "", false
 	}
 	delete(s.refresh, Hash(refreshToken)) // single-use
+	delete(s.sessions, sessHash)          // invalidate the old session token
 
 	newToken := RandomToken("st_")
 	newHash := Hash(newToken)
@@ -271,6 +339,48 @@ func (s *Store) RefreshSession(refreshToken string) (string, string, bool) {
 	}
 	s.refresh[Hash(newRefresh)] = newHash
 	return newToken, newRefresh, true
+}
+
+// TouchDevice records the last time a device had a live tunnel, so GC can
+// free stale device slots.
+func (s *Store) TouchDevice(deviceID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if d, ok := s.devices[deviceID]; ok {
+		d.LastSeen = time.Now().UnixMilli()
+	}
+}
+
+// GC drops expired sessions, stale devices (no tunnel in DeviceStaleAfter)
+// and hosts that are gone entirely. Runs on a timer from main.
+func (s *Store) GC(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nowMs := now.UnixMilli()
+	for h, sess := range s.sessions {
+		if nowMs > sess.ExpiresAt {
+			delete(s.sessions, h)
+		}
+	}
+	for rtHash, stHash := range s.refresh {
+		if _, ok := s.sessions[stHash]; !ok {
+			delete(s.refresh, rtHash)
+		}
+	}
+	for dID, d := range s.devices {
+		if nowMs-d.LastSeen > int64(DeviceStaleAfter/time.Millisecond) {
+			delete(s.devices, dID)
+			if h, ok := s.hosts[d.HostID]; ok {
+				delete(h.Devices, dID)
+			}
+		}
+	}
+	for hID, h := range s.hosts {
+		if len(h.Devices) == 0 && h.TokenHash != "" && nowMs-h.LastSeen > int64(DeviceStaleAfter/time.Millisecond) {
+			delete(s.hosts, hID)
+		}
+	}
 }
 
 // RevokeSession drops a session token (and its refresh token).

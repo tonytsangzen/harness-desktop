@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -166,32 +167,104 @@ func (h *hub) toDevice(deviceID string, f Frame) string {
 	return ""
 }
 
-func (h *hub) channelDevice(ch string) string {
+func (h *hub) channelDevice(hostID, ch string) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	// Host replies carry the channel but no deviceID: the device that opened
-	// the channel is the sole owner (one mux channel per device in v1).
-	return h.channels[ch]
+	// Channel keys are scoped per host (hostID/channel) so a channel name used
+	// by devices of two different hosts can never cross-route replies.
+	return h.channels[hostID+"/"+ch]
 }
 
-func (h *hub) bindChannel(ch, deviceID string) {
+func (h *hub) bindChannel(hostID, ch, deviceID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	// Latest opener wins: a reused channel name belongs to the current device.
-	h.channels[ch] = deviceID
+	h.channels[hostID+"/"+ch] = deviceID
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
 type server struct {
-	store *store.Store
-	hub   *hub
+	store       *store.Store
+	hub         *hub
+	pairLimiter *rateLimiter // POST /pair per-IP limit
+	regLimiter  *rateLimiter // host register per-IP limit
+}
+
+// rateLimiter is a minimal per-IP sliding-window counter for sensitive
+// endpoints (pair, host register). Prevents brute-force floods; not a full
+// anti-DoS (behind nginx in production, which adds its own limits).
+type rateLimiter struct {
+	mu    sync.Mutex
+	limit int
+	win   time.Duration
+	seen  map[string]*rlWindow
+}
+
+type rlWindow struct {
+	start time.Time
+	count int
+}
+
+func newRateLimiter(limit int, win time.Duration) *rateLimiter {
+	return &rateLimiter{limit: limit, win: win, seen: map[string]*rlWindow{}}
+}
+
+func (r *rateLimiter) allow(ip string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	w, ok := r.seen[ip]
+	if !ok || now.Sub(w.start) >= r.win {
+		r.seen[ip] = &rlWindow{start: now, count: 1}
+		return true
+	}
+	w.count++
+	return w.count <= r.limit
+}
+
+// sweep drops windows older than the window so the map can't grow unbounded.
+func (r *rateLimiter) sweep() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cutoff := time.Now().Add(-r.win)
+	for ip, w := range r.seen {
+		if w.start.Before(cutoff) {
+			delete(r.seen, ip)
+		}
+	}
+}
+
+// clientIP extracts the peer IP from r.RemoteAddr (host:port).
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func main() {
 	st := store.New()
 	h := newHub(st)
-	srv := &server{store: st, hub: h}
+	srv := &server{
+		store:       st,
+		hub:         h,
+		pairLimiter: newRateLimiter(10, time.Minute),
+		regLimiter:  newRateLimiter(10, time.Minute),
+	}
+
+	// Periodic GC: drop expired sessions, stale devices and dead hosts so the
+	// in-memory tables can't grow without bound (long-running DoS protection).
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			st.GC(time.Now())
+			srv.pairLimiter.sweep()
+			srv.regLimiter.sweep()
+		}
+	}()
 
 	mux := http.NewServeMux()
 	// Health checks: keep the bare /healthz for container/loopback probes,
@@ -260,6 +333,10 @@ func (s *server) handlePair(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method", "POST required")
 		return
 	}
+	if !s.pairLimiter.allow(clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "rate-limited", "too many attempts, try later")
+		return
+	}
 	var req struct {
 		DeviceID string `json:"deviceId"`
 		Pin      string `json:"pin"`
@@ -270,15 +347,13 @@ func (s *server) handlePair(w http.ResponseWriter, r *http.Request) {
 	}
 	dev, sessionToken, refreshToken, ok, code := s.store.PairDevice(req.DeviceID, req.Pin)
 	if !ok {
-		log.Printf("pair: deviceId=%q pin=%q FAILED code=%q", req.DeviceID, req.Pin, code)
-		status := http.StatusConflict
-		if code == "pair-invalid" {
-			status = http.StatusConflict
-		}
-		writeError(w, status, code, code)
+		// One uniform error code: distinguishing pair-expired / pair-invalid /
+		// pair-locked would let an attacker probe whether a hostId exists.
+		log.Printf("pair: deviceId=%s FAILED code=%q", truncate(req.DeviceID, 8), code)
+		writeError(w, http.StatusConflict, "pair-invalid", "PIN invalid or expired")
 		return
 	}
-	log.Printf("pair: deviceId=%q OK -> device=%q", req.DeviceID, dev.ID)
+	log.Printf("pair: deviceId=%s OK -> device=%s", truncate(req.DeviceID, 8), truncate(dev.ID, 8))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"hostId": dev.HostID, "deviceId": dev.ID,
@@ -384,7 +459,7 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 		if bearer(r) != "" {
 			// Relay lost the host (restart / data reset): tell the bridge to
 			// re-register, keeping this connection open for its register frame.
-			log.Printf("host: token %q unknown -> ask re-register", truncate(bearer(r), 10))
+			log.Printf("host: token %q unknown -> ask re-register", truncate(bearer(r), 6))
 			c.writeJSON(map[string]any{"v": 1, "type": "control", "kind": "unknown-host"})
 		}
 		// Wait for the register control frame (5s budget).
@@ -405,9 +480,10 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 			HostName   string `json:"hostName"`
 			DshVersion string `json:"dshVersion"`
 			Pin        string `json:"pin"`
+			Token      string `json:"token"` // persisted hostToken from a previous register
 		}
 		if err := json.Unmarshal(f.Body, &reg); err != nil {
-			log.Printf("host register: bad body %q: %v", f.Body, err)
+			log.Printf("host register: bad body: %v", err)
 			ws.Close()
 			return
 		}
@@ -416,20 +492,40 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 			ws.Close()
 			return
 		}
-		host, hostToken, pin, pinExpires = s.store.RegisterHost(reg.HostID, reg.HostName, reg.DshVersion, reg.Pin)
+		if !s.regLimiter.allow(clientIP(r)) {
+			log.Printf("host register: rate-limited from %s", clientIP(r))
+			ws.Close()
+			return
+		}
+		var ok bool
+		var code string
+		host, hostToken, pin, pinExpires, ok, code = s.store.RegisterHost(reg.HostID, reg.HostName, reg.DshVersion, reg.Pin, reg.Token)
+		if !ok {
+			// host-conflict / weak-pin: close without revealing anything useful.
+			// Write the denial synchronously — the async pump would lose the
+			// frame when the socket closes right after.
+			log.Printf("host register: rejected hostId=%s code=%q", truncate(reg.HostID, 8), code)
+			if msg, err := json.Marshal(map[string]any{
+				"v": 1, "type": "control", "kind": "register-denied", "code": code,
+			}); err == nil {
+				_ = ws.WriteMessage(websocket.TextMessage, msg)
+			}
+			ws.Close()
+			return
+		}
 		register = true
 		ws.SetReadDeadline(time.Time{})
-		log.Printf("host register: hostId=%q name=%q dsh=%q (reused=%v)", reg.HostID, reg.HostName, reg.DshVersion, !register)
+		log.Printf("host register: hostId=%s name=%q", truncate(host.ID, 8), reg.HostName)
 	} else {
 		// Token-authenticated reconnect: refuse when this host already has a
 		// live connection (a duplicate bridge process would otherwise kick and
 		// re-register each other in an endless loop).
 		if s.hub.hostConn(host.ID) != nil {
-			log.Printf("host: hostId=%q already online, refusing duplicate", host.ID)
+			log.Printf("host: hostId=%s already online, refusing duplicate", truncate(host.ID, 8))
 			ws.Close()
 			return
 		}
-		log.Printf("host reconnect via token: hostId=%q", host.ID)
+		log.Printf("host reconnect via token: hostId=%s", truncate(host.ID, 8))
 	}
 
 	kicked := s.hub.attachHost(host.ID, c)
@@ -437,7 +533,7 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 	defer s.hub.detachHost(host.ID, c)
 
 	if kicked {
-		log.Printf("host: hostId=%q replaced by new connection", host.ID)
+		log.Printf("host: hostId=%s replaced by new connection", truncate(host.ID, 8))
 		ws.Close()
 		return
 	}
@@ -449,7 +545,7 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 				"pin": pin, "pinExpiresAt": pinExpires,
 			},
 		})
-		log.Printf("host: registered sent hostId=%q pin=%q", host.ID, pin)
+		log.Printf("host: registered hostId=%s", truncate(host.ID, 8))
 	}
 
 	readerLoop(c, func(f Frame) {
@@ -457,11 +553,11 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 		case "ping":
 			c.writeJSON(map[string]any{"v": 1, "type": "pong"})
 		case "rpc-reply", "sse-frame", "sse-close", "http-reply", "signal":
-			// Host -> device: route by channel.
-			dev := s.hub.channelDevice(f.Channel)
+			// Host -> device: route by channel (scoped to this host).
+			dev := s.hub.channelDevice(host.ID, f.Channel)
 			if dev != "" {
 				if code := s.hub.toDevice(dev, f); code != "" {
-					log.Printf("host->device: route failed ch=%q dev=%q code=%q", f.Channel, dev, code)
+					log.Printf("host->device: route failed ch=%q code=%q", truncate(f.Channel, 12), code)
 				} else {
 					// Summarize rpc-reply bodies so the session list contents
 					// are visible without dumping the whole payload.
@@ -513,7 +609,8 @@ func (s *server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	defer ws.Close()
 	s.hub.attachDevice(sess.DeviceID, c)
 	defer s.hub.detachDevice(sess.DeviceID, c)
-	log.Printf("device: connected deviceId=%q hostId=%q", sess.DeviceID, sess.HostID)
+	s.store.TouchDevice(sess.DeviceID)
+	log.Printf("device: connected deviceId=%s", truncate(sess.DeviceID, 8))
 
 	readerLoop(c, func(f Frame) {
 		switch f.Type {
@@ -521,14 +618,14 @@ func (s *server) handleDevice(w http.ResponseWriter, r *http.Request) {
 			c.writeJSON(map[string]any{"v": 1, "type": "pong"})
 		case "rpc", "sse-open", "respond", "http", "signal":
 			if f.Channel != "" && f.Type != "sse-close" {
-				s.hub.bindChannel(f.Channel, sess.DeviceID)
+				s.hub.bindChannel(sess.HostID, f.Channel, sess.DeviceID)
 			}
 			if code := s.hub.toHost(sess.HostID, f); code != "" {
 				// Transport-level error reply to the device, shaped by frame type
 				// so the bridge resolves its pending request immediately instead
 				// of hanging until its own timeout.
-				log.Printf("device->host: route failed type=%q ch=%q rpcId=%q hostId=%q code=%q",
-					f.Type, f.Channel, f.RpcID, sess.HostID, code)
+				log.Printf("device->host: route failed type=%q ch=%q code=%q",
+					f.Type, truncate(f.Channel, 12), code)
 				if f.Type == "http" {
 					c.writeJSON(map[string]any{
 						"v": 1, "type": "http-reply", "id": f.ID, "channel": f.Channel,

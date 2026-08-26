@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### 安全加固（relay + 壳 + bridge）
+
+- **Host 注册劫持防护**：hostId 已存在时，匿名重注册被拒绝（`host-conflict`）——知道 hostId 也无法踢掉真 bridge / 截获设备流量；bridge 持久化 hostToken，重启后凭 token 重连/重注册
+- **hostId 高熵化**：设备 ID 由「设备信息派生的 13 位数字」改为 **32 字节 CSPRNG 随机**（`h_` + 64 hex），无法从公开机器信息推导
+- **跨 host 信道隔离**：channel 路由键加 host 域，不同 host 的同名 channel 不再可能串扰
+- **弱 PIN 拒绝**：`000000`/`123456`/连续或相同数字等固定 PIN 被中继拒绝，壳端设置面板同步校验
+- **配对错误码统一**：`pair-expired`/`pair-used`/`pair-locked` 合并为 `pair-invalid`，pair 端点无法被用来探测 hostId 或 PIN 状态
+- **每 IP 限速**（pair/register，10 次/分钟）+ **过期清理 GC**（session/设备/空 host 定期回收，防内存无限增长）
+- **日志脱敏**：hostId/PIN 不再明文记录；refresh 旋转时旧 sessionToken 立即失效
+
 ## [1.2.0] - 2026-08-25
 
 ### 修复

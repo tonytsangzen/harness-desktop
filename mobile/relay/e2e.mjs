@@ -4,11 +4,6 @@
 const BASE = "ws://127.0.0.1:8443/relay/v1";
 const HTTP = "http://127.0.0.1:8443/relay/v1";
 
-// --- 0. Health ---
-const hz = await fetch("http://127.0.0.1:8443/relay/healthz");
-ok(hz.status === 200 && (await hz.text()) === "ok", "relay/healthz ok");
-
-
 function fail(msg) {
   console.error("FAIL:", msg);
   process.exit(1);
@@ -16,6 +11,10 @@ function fail(msg) {
 const ok = (cond, msg) => { if (!cond) fail(msg); console.log("  ok:", msg); };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// --- 0. Health ---
+const hz = await fetch("http://127.0.0.1:8443/relay/healthz");
+ok(hz.status === 200 && (await hz.text()) === "ok", "relay/healthz ok");
 
 // --- 1. Host register ---
 const hostWs = new WebSocket(`${BASE}/host`);
@@ -65,7 +64,9 @@ const reuseRes = await fetch(`${HTTP}/pair`, {
   body: JSON.stringify({ deviceId: hostId, pin }),
 });
 const reuseBody = await reuseRes.json();
-ok(reuseRes.status === 409 && reuseBody.error?.code === "pair-used", "pair ticket single-use");
+// Error codes are intentionally unified (pair-invalid) so the pair endpoint
+// can't be used to probe whether a hostId exists or a ticket is spent.
+ok(reuseRes.status === 409 && reuseBody.error?.code === "pair-invalid", "pair ticket single-use");
 
 // --- 3. Device connect + rpc round trip ---
 const devWs = new WebSocket(`${BASE}/device`, { headers: { Authorization: `Bearer ${pair.sessionToken}` } });

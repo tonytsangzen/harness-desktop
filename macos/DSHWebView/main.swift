@@ -1,7 +1,7 @@
 import AppKit
 import WebKit
-import CommonCrypto
 import IOKit
+import Security
 import SystemConfiguration
 
 // MARK: - Configuration
@@ -658,9 +658,15 @@ final class MobileRemoteManager {
             return
         }
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: nodePath)
-        p.arguments = [bridgePath.path, "--relay", relayURL, "--dsh-port", "\(dshPort)",
-                       "--device-id", deviceID, "--pin", StablePairingPin()]
+        var args = [bridgePath.path, "--relay", relayURL, "--dsh-port", "\(dshPort)",
+                    "--device-id", deviceID, "--pin", StablePairingPin()]
+        // Persisted hostToken lets a bridge restart reconnect by token instead
+        // of re-registering — the relay refuses anonymous re-registration of an
+        // existing hostId (hijack protection).
+        if let tok = UserDefaults.standard.string(forKey: "mobileHostToken"), !tok.isEmpty {
+            args += ["--host-token", tok]
+        }
+        p.arguments = args
         p.standardOutput = Pipe()
         p.standardError = FileHandle.nullDevice
         let pipe = p.standardOutput as! Pipe
@@ -734,6 +740,8 @@ final class MobileRemoteManager {
             guard let hostId = json["hostId"] as? String,
                   let hostToken = json["hostToken"] as? String,
                   let pin = json["pin"] as? String else { return }
+            // Persist the token so the next bridge start reconnects by token.
+            UserDefaults.standard.set(hostToken, forKey: "mobileHostToken")
             onRegistered?(Pairing(
                 hostId: hostId,
                 hostToken: hostToken,
@@ -757,35 +765,52 @@ final class MobileRemoteManager {
 func StablePairingPin() -> String {
     let key = "mobilePairingPin"
     if let existing = UserDefaults.standard.string(forKey: key),
-       existing.count == 6, existing.allSatisfy({ $0.isNumber }) {
+       existing.count == 6, existing.allSatisfy({ $0.isNumber }), !isWeakPin(existing) {
         return existing
     }
-    let pin = String((0..<6).map { _ in "0123456789".randomElement()! })
+    var pin: String
+    repeat {
+        pin = String((0..<6).map { _ in "0123456789".randomElement()! })
+    } while isWeakPin(pin)
     UserDefaults.standard.set(pin, forKey: key)
     return pin
 }
 
-/// 13-digit random device ID derived from device info (hostname + hardware
-/// UUID), stable across launches so reconnects reuse the same host identity.
+/// True for trivially guessable 6-digit PINs: all-same digits, ascending /
+/// descending runs, and common defaults. Mirrors the relay's WeakPin check.
+func isWeakPin(_ pin: String) -> Bool {
+    guard pin.count == 6, pin.allSatisfy({ $0.isNumber }) else { return true }
+    if pin.allSatisfy({ $0 == pin.first! }) { return true }
+    let digits = pin.map { $0.wholeNumberValue! }
+    var asc = true, desc = true
+    for i in 1..<6 {
+        if digits[i] != digits[i - 1] + 1 { asc = false }
+        if digits[i] != digits[i - 1] - 1 { desc = false }
+    }
+    if asc || desc { return true }
+    return ["123123", "112233", "121212", "111222", "000001", "123321"].contains(pin)
+}
+
+/// High-entropy device ID (32 random bytes, hex) used as the host ID on the
+/// relay. Random and persisted, so it is stable across launches but cannot be
+/// guessed or derived from device info — the previous 13-digit hash of
+/// hostname+UUID was predictable from public machine info, which would let an
+/// attacker who learns a victim's hostId hijack the host registration.
 func DeviceID() -> String {
-    var seed = Host.current().localizedName ?? "unknown"
-    // Hardware UUID (macOS): IOPlatformUUID via IOKit.
-    let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
-    if service != 0 {
-        if let uuid = IORegistryEntryCreateCFProperty(service, "IOPlatformUUID" as CFString,
-                                                      kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
-            seed += "|" + uuid
-        }
-        IOObjectRelease(service)
+    let key = "mobileDeviceId"
+    if let existing = UserDefaults.standard.string(forKey: key), existing.hasPrefix("h_"), existing.count == 66 {
+        return existing
     }
-    var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-    seed.withCString { buf in
-        CC_SHA256(buf, CC_LONG(seed.utf8.count), &digest)
+    var bytes = [UInt8](repeating: 0, count: 32)
+    let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+    if status != errSecSuccess {
+        // Extremely unlikely; fall back to a time-seeded value rather than crash.
+        return "h_" + String(format: "%016llx", UInt64(Date().timeIntervalSince1970 * 1000))
     }
-    // First 8 bytes -> UInt64 -> mod 10^13 (13-digit, zero padded).
-    var value: UInt64 = 0
-    for i in 0..<8 { value = (value << 8) | UInt64(digest[i]) }
-    return String(format: "%013llu", value % 10_000_000_000_000)
+    let hex = bytes.map { String(format: "%02x", $0) }.joined()
+    let id = "h_" + hex
+    UserDefaults.standard.set(id, forKey: key)
+    return id
 }
 
 /// The pairing QR content: relay host + device ID, plus the relay's own
@@ -2180,9 +2205,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             }
         }
         relayChanged = relay != oldEffective
-        // Save the pairing PIN when it is a valid 6-digit number.
+        // Save the pairing PIN when it is a valid 6-digit number and not a
+        // trivially guessable one (the relay refuses weak fixed PINs too).
         if let pinText = relayPinField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
            pinText.count == 6, pinText.allSatisfy({ $0.isNumber }) {
+            if isWeakPin(pinText) {
+                let alert = NSAlert()
+                alert.messageText = s.settings
+                alert.informativeText = "该 PIN 过于简单，无法使用（例如 000000、123456、连续或相同数字）。请换一个。"
+                alert.runModal()
+                NSApp.stopModal()
+                panel.orderOut(nil)
+                return
+            }
             UserDefaults.standard.set(pinText, forKey: "mobilePairingPin")
             pinChanged = pinText != oldPin
         }
