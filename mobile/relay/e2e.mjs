@@ -135,15 +135,84 @@ setTimeout(() => devWs.send(JSON.stringify({ v: 1, type: "ping" })), 100);
 ok(await pongSeen, "ping/pong");
 
 // --- 6. Device auth: bad token rejected ---
+// Node's WebSocket fires only `onerror` (non-101) for a 401 handshake, so
+// accept either signal; the point is that no usable tunnel is established.
 const badDev = new WebSocket(`${BASE}/device`, { headers: { Authorization: "Bearer nope" } });
+let badRejected = false;
 let badStatus = 0;
 await new Promise((res) => {
-  badDev.onerror = res; badDev.onclose = (e) => { badStatus = e.code; res(); };
+  badDev.onerror = () => { badRejected = true; res(); };
+  badDev.onclose = (e) => { badRejected = true; badStatus = e.code; res(); };
   setTimeout(res, 1500);
 });
-ok(badStatus !== 0, `bad token rejected (close ${badStatus})`);
+ok(badRejected, `bad token rejected (close ${badStatus})`);
 
-hostWs.close();
+// --- 7. Chunked http-reply passes through the relay ---
+const httpId = "http_e2e", httpCh = "ch_e2e3";
+devWs.send(JSON.stringify({
+  v: 1, type: "http", id: httpId, channel: httpCh, method: "GET", path: "/assets/big.js",
+  body: {},
+}));
+let hostGotHttp;
+for (let i = 0; i < 50 && !hostGotHttp; i++) {
+  await sleep(50);
+  hostGotHttp = hostFrames.find((f) => f.type === "http" && f.id === httpId);
+}
+ok(!!hostGotHttp, "host received http frame");
+
+// Host answers with 3 chunk parts (headers on part 0), like bridge.mjs.
+const partData = ["QUFB", "QkJC", "Q0ND"]; // base64("AAA"), ("BBB"), ("CCC")
+partData.forEach((b64, i) => {
+  hostWs.send(JSON.stringify({
+    v: 1, type: "http-reply", channel: httpCh, id: httpId, status: 200,
+    body: {
+      ...(i === 0 ? { headers: { "content-type": "text/javascript" } } : {}),
+      body: b64,
+      part: { index: i, total: partData.length },
+    },
+  }));
+});
+let devHttpParts = [];
+for (let i = 0; i < 100 && devHttpParts.length < 3; i++) {
+  await sleep(50);
+  devHttpParts = devFrames.filter((f) => f.type === "http-reply" && f.id === httpId);
+}
+ok(devHttpParts.length === 3, `device received all ${devHttpParts.length}/3 http-reply parts`);
+ok(devHttpParts.every((f, i) => f.body?.part?.index === i), "parts arrived in order with index");
+ok(devHttpParts[0].status === 200 && devHttpParts[0].body.headers["content-type"] === "text/javascript",
+  "part 0 carries status + headers");
+ok(Buffer.from(devHttpParts.map((f) => f.body.body).join(""), "base64").toString() === "AAABBBCCC",
+  "reassembled body matches");
+
+// --- 8. Zombie host tunnel takeover via persisted token ---
+// With RELAY_STALE_HOST_AFTER small, a token-authenticated reconnect takes
+// over a tunnel that stopped answering pings instead of being refused for
+// DeadAfter (90s) — that stale window showed up as "host offline" flakiness.
+await sleep(1600);
+let host2Closed = new Promise((res) => { hostWs.onclose = (e) => res(e); });
+const hostFramesBefore = hostFrames.length;
+const host2 = new WebSocket(`${BASE}/host`, { headers: { Authorization: `Bearer ${hostToken}` } });
+await new Promise((res, rej) => { host2.onopen = res; host2.onerror = rej; });
+host2.onmessage = (e) => hostFrames.push(JSON.parse(e.data));
+const oldClose = await Promise.race([host2Closed, sleep(3000).then(() => null)]);
+ok(!!oldClose, `stale host tunnel kicked (code ${oldClose?.code ?? "?"})`);
+// Token reconnect restores the tunnel silently — no fresh `registered`.
+ok(!hostFrames.slice(hostFramesBefore).some((f) => f.type === "control" && f.kind === "registered"),
+  "token reconnect needs no re-register");
+
+// The live host is now host2: device rpc must route to it.
+devWs.send(JSON.stringify({
+  v: 1, type: "rpc", channel: "ch_e2e4", rpcId: "rpc_e2e2",
+  path: "/api/session.list", body: {},
+}));
+let host2GotRpc;
+for (let i = 0; i < 100 && !host2GotRpc; i++) {
+  await sleep(50);
+  host2GotRpc = hostFrames.find((f) => f.type === "rpc" && f.rpcId === "rpc_e2e2");
+}
+ok(!!host2GotRpc, "device traffic routes to the takeover connection");
+
+host2.close();
 devWs.close();
 console.log("\nE2E PASS");
 process.exit(0);

@@ -44,9 +44,11 @@ const RELAY = (() => {
   let r = args.values.relay.replace(/\/$/, "");
   // Accept https://relay.example.com (as stored by the shell Settings… dialog)
   // or a bare host:port; Node's built-in WebSocket only accepts ws://wss://.
+  // ws:// must pass through untouched — prefixing it produced `wss://ws://…`,
+  // which fails silently forever (self-hosted LAN relays hit exactly this).
   if (r.startsWith("https://")) r = "wss://" + r.slice("https://".length);
   else if (r.startsWith("http://")) r = "ws://" + r.slice("http://".length);
-  else r = "wss://" + r;
+  else if (!r.startsWith("ws://") && !r.startsWith("wss://")) r = "wss://" + r;
   return r;
 })();
 const DSH_BASE = `http://${args.values["dsh-host"]}:${args.values["dsh-port"]}`;
@@ -254,9 +256,17 @@ function connect() {
     sseStreams.forEach((ctl) => ctl.abort());
     sseStreams.clear();
     setTimeout(connect, backoff);
-    backoff = Math.min(backoff * 2, 60000);
+    // Cap low (10s): with token takeover on the relay a refused reconnect is
+    // rare, and a short cap turns a relay restart / network blip into a
+    // second-scale outage instead of a minute-long one.
+    backoff = Math.min(backoff * 2, 10000);
   };
-  ws.onerror = () => { /* onclose follows */ };
+  ws.onerror = () => {
+    // A pre-registration connect failure used to be completely silent (this
+    // is how the wss://-prefix bug above hid for so long). The shell just
+    // logs unknown events, so emit one.
+    if (!registered) emit("relay-unreachable", { relay: RELAY });
+  };
 }
 
 function sendRegister() {
@@ -324,21 +334,69 @@ async function handleRpc(frame) {
 
 // ---- Generic HTTP proxy: the phone's WebView talks to dsh through this ----
 // Frames: http {id, channel, method, path, body:{headers?, body(base64)?}}
-//        http-reply {id, channel, status, body:{headers?, body(base64)?}}
+//        http-reply {id, channel, status, body:{headers?, body(b64), part?}}
+// Large replies are sent as several `part` frames (~256 KiB of base64 each)
+// instead of one giant JSON text frame: the relay and phone reassemble them,
+// a transfer can no longer blow the frame size limits of intermediaries, and
+// the phone's idle-based timeout sees progress while chunks keep arriving.
+// part = {index, total}; part[0] carries the headers; an `abort` field marks
+// a transfer that failed midway (receiver answers 502 to the page).
+
+// Raw bytes per part (base64 inflates by ~4/3 → ~256 KiB frames).
+const REPLY_CHUNK = 192 * 1024;
+
+function wsOpen() {
+  return ws && ws.readyState === WebSocket.OPEN;
+}
+
+// The built-in WebSocket buffers unboundedly; on a slow relay downlink a
+// multi-MB reply must not all sit in memory at once. Wait until the socket
+// has drained below ~1 MiB before queueing the next chunk.
+function waitDrain() {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (!wsOpen() || (ws.bufferedAmount || 0) < 1 << 20) resolve();
+      else setTimeout(check, 25);
+    };
+    check();
+  });
+}
+
 async function handleHttp(frame) {
   const bodyObj = frame.body && typeof frame.body === "object" ? frame.body : {};
   const headers = {};
   for (const [k, v] of Object.entries(bodyObj.headers || {})) headers[k] = v;
   const resp = await proxyHttp(frame.method || "GET", frame.path, headers, bodyObj.body);
-  send({
-    v: 1, type: "http-reply", channel: frame.channel, id: frame.id, status: resp.status,
-    body: { headers: resp.headers, body: resp.body },
-  });
+  const buf = resp.body;
+  const total = Math.max(1, Math.ceil(buf.length / REPLY_CHUNK));
+  try {
+    for (let i = 0; i < total; i++) {
+      if (!wsOpen()) return;
+      const part = {
+        v: 1, type: "http-reply", channel: frame.channel, id: frame.id, status: resp.status,
+        body: {
+          ...(i === 0 ? { headers: resp.headers } : {}),
+          body: buf.subarray(i * REPLY_CHUNK, (i + 1) * REPLY_CHUNK).toString("base64"),
+          part: { index: i, total },
+        },
+      };
+      send(part);
+      if (i < total - 1) await waitDrain();
+    }
+  } catch (err) {
+    if (wsOpen()) {
+      send({
+        v: 1, type: "http-reply", channel: frame.channel, id: frame.id, status: 502,
+        body: { body: Buffer.from(String(err?.message || err)).toString("base64"), abort: true },
+      });
+    }
+  }
 }
 
 /// Proxy one HTTP request to the local dsh web (used by the relay tunnel).
+/// Returns {status, headers, body: Buffer} — chunking happens in handleHttp.
 async function proxyHttp(method, path, headers, bodyBase64) {
-  const init = { method, headers: headers || {}, signal: AbortSignal.timeout(8000) };
+  const init = { method, headers: headers || {}, signal: AbortSignal.timeout(20000) };
   if (bodyBase64 != null && bodyBase64 !== "") {
     init.body = Buffer.from(bodyBase64, "base64");
   }
@@ -359,18 +417,15 @@ async function proxyHttp(method, path, headers, bodyBase64) {
       const gz = gzipSync(buf, { level: 6 });
       if (gz.length < buf.length * 0.9) {
         replyHeaders["content-encoding"] = "gzip";
-        return {
-          status: resp.status, headers: replyHeaders,
-          body: gz.toString("base64"),
-        };
+        return { status: resp.status, headers: replyHeaders, body: gz };
       }
     }
-    return { status: resp.status, headers: replyHeaders, body: buf.toString("base64") };
+    return { status: resp.status, headers: replyHeaders, body: buf };
   } catch (err) {
     return {
       status: 502,
       headers: { "content-type": "text/plain" },
-      body: Buffer.from(String(err?.message || err)).toString("base64"),
+      body: Buffer.from(String(err?.message || err)),
     };
   }
 }

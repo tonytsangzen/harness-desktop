@@ -58,6 +58,7 @@ class RelayClient implements TunnelBackend {
   final Map<String, void Function(SseFrame)> _sseHandlers = {};
   final Map<String, void Function(String reason)> _sseClosers = {};
   final Map<String, Completer<Map<String, dynamic>>> _pendingHttp = {};
+  final Map<String, _HttpTransfer> _httpTransfers = {};
   final Map<String, void Function(String data)> _rawSseHandlers = {};
 
   /// Fired with true when the tunnel is up, false when the socket drops.
@@ -103,8 +104,9 @@ class RelayClient implements TunnelBackend {
         if (!_closing) _disconnect('closed');
       },
     );
-    // The relay sends nothing on connect, so a short silent window means the
-    // tunnel is up; an immediate reject (401) errors out within milliseconds.
+    // The relay answers the ping below immediately, so the tunnel is usually
+    // confirmed within one round trip; the silent window is only the fallback.
+    _send({'v': 1, 'type': 'ping'});
     await Future.any([
       ready.future,
       Future<void>.delayed(const Duration(milliseconds: 600)),
@@ -124,6 +126,10 @@ class RelayClient implements TunnelBackend {
       if (!c.isCompleted) c.completeError(err);
     }
     _pendingHttp.clear();
+    for (final t in _httpTransfers.values) {
+      t.fail(err);
+    }
+    _httpTransfers.clear();
   }
 
   void close() {
@@ -180,13 +186,7 @@ class RelayClient implements TunnelBackend {
       case 'http-reply':
         final id = f['id'] as String?;
         final body = (f['body'] as Map?)?.cast<String, dynamic>();
-        final c = id == null ? null : _pendingHttp.remove(id);
-        if (c != null && !c.isCompleted) {
-          c.complete({
-            'status': f['status'] as int? ?? 502,
-            'body': body,
-          });
-        }
+        if (id != null) _onHttpReply(id, f['status'] as int? ?? 502, body);
         break;
       default:
         break;
@@ -256,6 +256,12 @@ class RelayClient implements TunnelBackend {
 
   /// HTTP request through the tunnel (WebView proxy). Returns status +
   /// base64 body + headers.
+  ///
+  /// The bridge answers with one or more `http-reply` `part` frames. The
+  /// deadline is **idle-based**: the transfer is only aborted when no chunk
+  /// has arrived for [httpIdleTimeout] — a multi-MB plugin bundle on a slow
+  /// relay link keeps making progress and is never cut off by a total-time
+  /// cap (which is what made "plugin load failed" common before).
   Future<({int status, Map<String, String> headers, String bodyB64})> http(
     String method,
     String path, {
@@ -279,18 +285,52 @@ class RelayClient implements TunnelBackend {
         if (body != null && body.isNotEmpty) 'body': base64Encode(body),
       },
     });
-    try {
-      final r = await completer.future.timeout(const Duration(seconds: 30));
-      final rb = (r['body'] as Map?)?.cast<String, dynamic>() ?? const {};
-      return (
-        status: r['status'] as int? ?? 502,
-        headers: (rb['headers'] as Map?)?.cast<String, String>() ?? const {},
-        bodyB64: rb['body'] as String? ?? '',
-      );
-    } on TimeoutException {
-      _pendingHttp.remove(id);
-      throw RelayError('timeout', 'http $method $path timed out');
+    final transfer = _HttpTransfer(
+      onComplete: (r) {
+        _pendingHttp.remove(id);
+        _httpTransfers.remove(id);
+        if (!completer.isCompleted) completer.complete(r);
+      },
+      onError: (e) {
+        _pendingHttp.remove(id);
+        _httpTransfers.remove(id);
+        if (!completer.isCompleted) completer.completeError(e);
+      },
+    )..armIdleTimer();
+    _httpTransfers[id] = transfer;
+    final r = await completer.future;
+    final rb = (r['body'] as Map?)?.cast<String, dynamic>() ?? const {};
+    return (
+      status: r['status'] as int? ?? 502,
+      headers: (rb['headers'] as Map?)?.cast<String, String>() ?? const {},
+      bodyB64: rb['body'] as String? ?? '',
+    );
+  }
+
+  /// Handle one `http-reply` frame: either a complete single-frame reply or
+  /// one part of a chunked transfer (`body.part = {index, total}`).
+  void _onHttpReply(String id, int status, Map<String, dynamic>? body) {
+    final transfer = _httpTransfers[id];
+    final part = (body?['part'] as Map?)?.cast<String, dynamic>();
+    if (transfer == null || part == null) {
+      // Single-frame reply (or a late part after completion): answer the
+      // pending request directly.
+      final c = _pendingHttp.remove(id);
+      _httpTransfers.remove(id);
+      transfer?.cancel();
+      if (c != null && !c.isCompleted) c.complete({'status': status, 'body': body});
+      return;
     }
+    if (body?['abort'] == true) {
+      // The bridge failed midway through a chunked transfer.
+      final message = body?['body'] is String ? body!['body'] as String : 'chunked transfer aborted';
+      transfer.fail(RelayError('transport', message));
+      return;
+    }
+    final chunkB64 = body?['body'] as String? ?? '';
+    final index = (part['index'] as num?)?.toInt() ?? 0;
+    final total = (part['total'] as num?)?.toInt() ?? 1;
+    transfer.accept(index, total, status, body?['headers'], chunkB64);
   }
 
   void closeSse(String channel) {
@@ -322,5 +362,71 @@ class RelayClient implements TunnelBackend {
     final c = _channel;
     if (c == null) throw RelayError('disconnected', 'tunnel is not connected');
     return c;
+  }
+}
+
+/// Reassembles one chunked `http-reply` transfer.
+///
+/// Frames arrive with `body.part = {index, total}`; the headers ride on part
+/// 0. The transfer completes when every part has arrived, and fails if no
+/// part arrives within [httpIdleTimeout] — progress resets the clock, so a
+/// slow but alive transfer is never aborted.
+class _HttpTransfer {
+  _HttpTransfer({required this.onComplete, required this.onError});
+
+  static const httpIdleTimeout = Duration(seconds: 20);
+
+  final void Function(Map<String, dynamic> reply) onComplete;
+  final void Function(Object error) onError;
+
+  final List<String?> _chunks = [];
+  final Set<int> _seen = {};
+  int _total = 0;
+  int _status = 502;
+  Map<String, dynamic>? _headers;
+  Timer? _idle;
+
+  void armIdleTimer() => _resetIdle();
+
+  void _resetIdle() {
+    _idle?.cancel();
+    _idle = Timer(httpIdleTimeout, () {
+      fail(RelayError('timeout', 'http transfer stalled (${_seen.length}/$_total parts)'));
+    });
+  }
+
+  void accept(int index, int total, int status, Object? headers, String chunkB64) {
+    _resetIdle();
+    _total = total > 0 ? total : 1;
+    _status = status;
+    if (headers is Map) _headers ??= headers.cast<String, dynamic>();
+    if (index < 0 || index >= _total || !_seen.add(index)) return;
+    if (_chunks.length < _total) _chunks.length = _total;
+    _chunks[index] = chunkB64;
+    if (_seen.length < _total) return;
+    // All parts in: concatenate the base64 payloads into one body.
+    final bytes = <int>[];
+    for (final c in _chunks) {
+      if (c == null) return fail(RelayError('transport', 'missing chunk'));
+      bytes.addAll(base64Decode(c));
+    }
+    final reply = {
+      'status': _status,
+      'body': {
+        if (_headers != null) 'headers': _headers,
+        'body': base64Encode(bytes),
+      },
+    };
+    _idle?.cancel();
+    onComplete(reply);
+  }
+
+  void fail(Object error) {
+    _idle?.cancel();
+    onError(error);
+  }
+
+  void cancel() {
+    _idle?.cancel();
   }
 }

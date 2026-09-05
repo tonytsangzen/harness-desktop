@@ -23,12 +23,15 @@ class WebProxy {
   HttpServer? _server;
   final Map<String, WebSocket> _wsByChannel = {};
 
-  // Small in-memory cache for dsh's fingerprinted static assets. Every
-  // tunneled request costs a full phone↔relay↔desktop round trip, and the
-  // frontend loads many assets on each visit; caching the hash-named files
-  // (whose URL changes whenever the content changes, so stale entries are
-  // impossible) makes re-entering a terminal near-instant.
-  static const int _maxCacheBytes = 8 * 1024 * 1024;
+  // Small in-memory cache for dsh's fingerprinted static assets and plugin
+  // bundles. Every tunneled request costs a full phone↔relay↔desktop round
+  // trip, and the frontend loads many assets on each visit; caching the
+  // hash-named files (whose URL changes whenever the content changes, so
+  // stale entries are impossible) and rev-keyed /plugins/ bundles makes
+  // re-entering a terminal near-instant and keeps plugin loads off the slow
+  // relay link entirely after the first fetch.
+  static const int _maxCacheBytes = 24 * 1024 * 1024;
+  static const int _maxCacheEntryBytes = 8 * 1024 * 1024;
   final Map<String, _CachedResponse> _cache = {};
   int _cacheBytes = 0;
 
@@ -37,8 +40,14 @@ class WebProxy {
 
   int get port => _server?.port ?? 0;
 
-  bool _isCacheable(String method, String path) =>
-      method == 'GET' && path.startsWith('/assets/');
+  bool _isCacheable(String method, String path, String query) {
+    if (method != 'GET') return false;
+    if (path.startsWith('/assets/')) return true;
+    // Plugin bundles are static client scripts keyed by a rev param, so a
+    // query-bearing URL is immutable in practice.
+    if (path.startsWith('/plugins/') && query.contains('rev=')) return true;
+    return false;
+  }
 
   Future<void> start() async {
     // Fixed port keeps the WebView origin stable across launches so dsh's
@@ -86,7 +95,7 @@ class WebProxy {
       final fullPath = req.uri.query.isEmpty
           ? path
           : '$path?${req.uri.query}';
-      final cacheable = _isCacheable(req.method, path);
+      final cacheable = _isCacheable(req.method, path, req.uri.query);
       if (cacheable) {
         final hit = _cache[fullPath];
         if (hit != null) {
@@ -106,12 +115,26 @@ class WebProxy {
         if (l == 'host' || l == 'origin') return;
         headers[name] = values.join(',');
       });
-      final r = await client.http(
-        req.method,
-        fullPath,
-        headers: headers,
-        body: bodyBytes,
-      );
+      ({int status, Map<String, String> headers, String bodyB64}) r;
+      try {
+        r = await client.http(
+          req.method,
+          fullPath,
+          headers: headers,
+          body: bodyBytes,
+        );
+      } on Object {
+        // A timed-out idempotent request is very likely a transient relay
+        // hiccup (stalled chunk, tunnel blip). Without a retry the page shows
+        // "Failed to load plugins"; one retry on GET/HEAD recovers silently.
+        if (req.method != 'GET' && req.method != 'HEAD') rethrow;
+        r = await client.http(
+          req.method,
+          fullPath,
+          headers: headers,
+          body: bodyBytes,
+        );
+      }
       var respBody = r.bodyB64.isNotEmpty ? base64Decode(r.bodyB64) : const <int>[];
       var respHeaders = r.headers;
       // Inject the AbortSignal polyfill into the HTML entry document (only
@@ -153,6 +176,9 @@ class WebProxy {
   }
 
   void _store(String key, int status, Map<String, String> headers, List<int> body) {
+    // One oversized entry (a huge plugin bundle) must not evict everything
+    // else — skip caching it instead.
+    if (body.length > _maxCacheEntryBytes) return;
     final existing = _cache.remove(key);
     if (existing != null) _cacheBytes -= existing.size;
     final entry = _CachedResponse(status, headers, body);

@@ -38,11 +38,47 @@ type Frame struct {
 const (
 	PingInterval = 30 * time.Second
 	DeadAfter    = 90 * time.Second
+
+	// maxFrameBytes bounds one WebSocket message (base64 chunk frames are a
+	// few hundred KB; 8 MiB is generous) so a peer can't balloon our memory.
+	maxFrameBytes int64 = 8 << 20
+	// writeTimeout bounds each socket write: on a stalled link TCP buffers
+	// would otherwise let the write block for minutes while frames pile up.
+	writeTimeout = 10 * time.Second
 )
+
+// staleHostAfter: a host tunnel that hasn't produced any frame (including
+// pong answers) for this long is a zombie (TCP half-open, sleeping laptop).
+// A token-authenticated reconnect may take it over immediately instead of
+// waiting out DeadAfter. RELAY_STALE_HOST_AFTER overrides it (e2e tests).
+var staleHostAfter = 45 * time.Second
+
+func init() {
+	if v := os.Getenv("RELAY_STALE_HOST_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			staleHostAfter = d
+		}
+	}
+}
 
 type conn struct {
 	ws   *websocket.Conn
 	send chan []byte
+
+	mu       sync.Mutex
+	lastSeen time.Time // last frame received from the peer
+}
+
+func (c *conn) touch() {
+	c.mu.Lock()
+	c.lastSeen = time.Now()
+	c.mu.Unlock()
+}
+
+func (c *conn) idleFor() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Since(c.lastSeen)
 }
 
 func (c *conn) writeJSON(v any) bool {
@@ -54,7 +90,12 @@ func (c *conn) writeJSON(v any) bool {
 	case c.send <- data:
 		return true
 	default:
-		return false // slow consumer: caller closes the tunnel
+		// Slow consumer: the send queue is full. Drop the tunnel (not just
+		// this frame) — a silently lost frame leaves the peer waiting on a
+		// reply that never comes, while a closed socket triggers a clean
+		// reconnect on both ends.
+		c.ws.Close()
+		return false
 	}
 }
 
@@ -445,7 +486,7 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	c := &conn{ws: ws, send: make(chan []byte, 1024)}
+	c := &conn{ws: ws, send: make(chan []byte, 1024), lastSeen: time.Now()}
 	go pump(c)
 	defer ws.Close()
 
@@ -517,13 +558,22 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 		ws.SetReadDeadline(time.Time{})
 		log.Printf("host register: hostId=%s name=%q", truncate(host.ID, 8), reg.HostName)
 	} else {
-		// Token-authenticated reconnect: refuse when this host already has a
-		// live connection (a duplicate bridge process would otherwise kick and
-		// re-register each other in an endless loop).
-		if s.hub.hostConn(host.ID) != nil {
-			log.Printf("host: hostId=%s already online, refusing duplicate", truncate(host.ID, 8))
-			ws.Close()
-			return
+		// Token-authenticated reconnect. A duplicate bridge process would
+		// otherwise kick and re-register each other in an endless loop, so a
+		// connection that is still *live* refuses. But after a network blip /
+		// laptop sleep the registered tunnel is a zombie (TCP half-open): it
+		// stops answering the relay's 30s pings while the socket lingers.
+		// Refusing then would leave the host offline for up to DeadAfter —
+		// so a reconnect with a valid token takes over a tunnel that has
+		// been silent for staleHostAfter. (The token proves identity; the
+		// hijack protection on anonymous re-register is unaffected.)
+		if old := s.hub.hostConn(host.ID); old != nil {
+			if old.idleFor() < staleHostAfter {
+				log.Printf("host: hostId=%s already online, refusing duplicate", truncate(host.ID, 8))
+				ws.Close()
+				return
+			}
+			log.Printf("host: hostId=%s stale tunnel idle=%s, taking over", truncate(host.ID, 8), old.idleFor().Round(time.Second))
 		}
 		log.Printf("host reconnect via token: hostId=%s", truncate(host.ID, 8))
 	}
@@ -532,7 +582,11 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 	s.store.SetHostOnline(host.ID, true)
 	defer s.hub.detachHost(host.ID, c)
 
-	if kicked {
+	// A fresh register that displaces an existing tunnel closes itself: two
+	// racing bridge processes then damp their replace-fight (oldest wins).
+	// A token takeover must NOT self-close — taking over a stale tunnel is
+	// its entire purpose.
+	if register && kicked {
 		log.Printf("host: hostId=%s replaced by new connection", truncate(host.ID, 8))
 		ws.Close()
 		return
@@ -604,7 +658,7 @@ func (s *server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	c := &conn{ws: ws, send: make(chan []byte, 1024)}
+	c := &conn{ws: ws, send: make(chan []byte, 1024), lastSeen: time.Now()}
 	go pump(c)
 	defer ws.Close()
 	s.hub.attachDevice(sess.DeviceID, c)
@@ -664,20 +718,27 @@ func pump(c *conn) {
 		ticker.Stop()
 		c.ws.Close()
 	}()
+	write := func(data []byte) bool {
+		c.ws.SetWriteDeadline(time.Now().Add(writeTimeout))
+		if err := c.ws.WriteMessage(websocket.TextMessage, data); err != nil {
+			return false
+		}
+		return true
+	}
 	for {
 		select {
 		case data, ok := <-c.send:
 			if !ok {
+				c.ws.SetWriteDeadline(time.Now().Add(writeTimeout))
 				c.ws.WriteMessage(websocket.CloseMessage,
 					websocket.FormatCloseMessage(websocket.CloseNormalClosure, "replaced"))
 				return
 			}
-			if err := c.ws.WriteMessage(websocket.TextMessage, data); err != nil {
+			if !write(data) {
 				return
 			}
 		case <-ticker.C:
-			if err := c.ws.WriteMessage(websocket.TextMessage,
-				[]byte(`{"v":1,"type":"ping"}`)); err != nil {
+			if !write([]byte(`{"v":1,"type":"ping"}`)) {
 				return
 			}
 		}
@@ -686,8 +747,10 @@ func pump(c *conn) {
 
 // readerLoop reads frames until the socket dies; pings are answered inline.
 func readerLoop(c *conn, handle func(Frame)) {
+	c.ws.SetReadLimit(maxFrameBytes)
 	c.ws.SetReadDeadline(time.Now().Add(DeadAfter))
 	c.ws.SetPongHandler(func(string) error {
+		c.touch()
 		c.ws.SetReadDeadline(time.Now().Add(DeadAfter))
 		return nil
 	})
@@ -702,6 +765,7 @@ func readerLoop(c *conn, handle func(Frame)) {
 			log.Printf("ws: read loop exit: %v", err)
 			return
 		}
+		c.touch()
 		var f Frame
 		if json.Unmarshal(raw, &f) != nil {
 			continue // corrupt frame: skip, keep stream alive
