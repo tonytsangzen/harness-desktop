@@ -1,7 +1,7 @@
 import AppKit
 import WebKit
+import CommonCrypto
 import IOKit
-import Security
 import SystemConfiguration
 
 // MARK: - Configuration
@@ -791,26 +791,32 @@ func isWeakPin(_ pin: String) -> Bool {
     return ["123123", "112233", "121212", "111222", "000001", "123321"].contains(pin)
 }
 
-/// High-entropy device ID (32 random bytes, hex) used as the host ID on the
-/// relay. Random and persisted, so it is stable across launches but cannot be
-/// guessed or derived from device info — the previous 13-digit hash of
-/// hostname+UUID was predictable from public machine info, which would let an
-/// attacker who learns a victim's hostId hijack the host registration.
+/// The device ID used as the host ID on the relay: a stable 13-digit number
+/// derived from machine info (name + platform UUID). Registration hijacking is
+/// defused by the relay's hostToken check, not by ID entropy.
 func DeviceID() -> String {
-    let key = "mobileDeviceId"
-    if let existing = UserDefaults.standard.string(forKey: key), existing.hasPrefix("h_"), existing.count == 66 {
-        return existing
+    // Installations of the brief high-entropy build persisted an "h_…" id;
+    // drop it so the numeric id (and a fresh registration) takes over.
+    UserDefaults.standard.removeObject(forKey: "mobileDeviceId")
+
+    var seed = Host.current().localizedName ?? "unknown"
+    // Hardware UUID (macOS): IOPlatformUUID via IOKit.
+    let service = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("IOPlatformExpertDevice"))
+    if service != 0 {
+        if let uuid = IORegistryEntryCreateCFProperty(service, "IOPlatformUUID" as CFString,
+                                                      kCFAllocatorDefault, 0)?.takeRetainedValue() as? String {
+            seed += "|" + uuid
+        }
+        IOObjectRelease(service)
     }
-    var bytes = [UInt8](repeating: 0, count: 32)
-    let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-    if status != errSecSuccess {
-        // Extremely unlikely; fall back to a time-seeded value rather than crash.
-        return "h_" + String(format: "%016llx", UInt64(Date().timeIntervalSince1970 * 1000))
+    var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    seed.withCString { buf in
+        CC_SHA256(buf, CC_LONG(seed.utf8.count), &digest)
     }
-    let hex = bytes.map { String(format: "%02x", $0) }.joined()
-    let id = "h_" + hex
-    UserDefaults.standard.set(id, forKey: key)
-    return id
+    // First 8 bytes -> UInt64 -> mod 10^13 (13-digit, zero padded).
+    var value: UInt64 = 0
+    for i in 0..<8 { value = (value << 8) | UInt64(digest[i]) }
+    return String(format: "%013llu", value % 10_000_000_000_000)
 }
 
 /// The pairing QR content: relay host + device ID, plus the relay's own
@@ -1697,6 +1703,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     private func buildWindow() {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
+        // Inline text predictions (the macOS input system guessing ahead of
+        // typing) add per-keystroke work in the web process; chat input is the
+        // hottest text field in this app, so opt out.
+        if #available(macOS 14.0, *) {
+            config.allowsInlinePredictions = false
+        }
 
         // Inject a script that intercepts programmatic <a download> clicks
         // (which WebKit does not reliably deliver as navigation downloads) and
@@ -1708,6 +1720,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         ))
+        // Long conversations render thousands of message nodes; WebKit pays
+        // layout/paint for all of them on every streamed token, which is the
+        // main source of jank in the webview. `content-visibility: auto` on
+        // offscreen message elements makes WebKit skip that work (supported
+        // since macOS 14.6-era WebKit; older systems ignore it harmlessly).
+        // Opt out with: defaults write com.deepvisus.harness-desktop contentVisibilityDisabled -bool YES
+        if !UserDefaults.standard.bool(forKey: "contentVisibilityDisabled") {
+            contentController.addUserScript(WKUserScript(
+                source: Self.renderBoostScript,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: true
+            ))
+        }
         config.userContentController = contentController
 
         let webView = ShortcutWebView(frame: .zero, configuration: config)
@@ -1737,6 +1762,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             }
             return originalClick.call(this);
         };
+    })();
+    """
+
+    /// JavaScript that applies `content-visibility: auto` to the children of
+    /// the conversation scroll container once the list is long enough, so
+    /// WebKit skips layout/paint for messages outside the viewport. Detection
+    /// is app-agnostic: the tallest vertically scrollable element wins. The
+    /// work per streamed token is O(new elements), never a DOM-wide scan.
+    private static let renderBoostScript = """
+    (() => {
+        if (typeof CSS === 'undefined' || !CSS.supports || !CSS.supports('content-visibility', 'auto')) return;
+        const MIN_CHILDREN = 25;
+        const styled = new WeakSet();
+        let container = null;
+        let observer = null;
+
+        const apply = () => {
+            if (!container || container.children.length < MIN_CHILDREN) return;
+            for (const child of container.children) {
+                if (styled.has(child)) continue;
+                styled.add(child);
+                child.style.contentVisibility = 'auto';
+                child.style.containIntrinsicSize = 'auto 160px';
+            }
+        };
+
+        const watch = () => {
+            if (observer) observer.disconnect();
+            observer = new MutationObserver(() => {
+                if (container && container.isConnected) apply();
+            });
+            observer.observe(container, { childList: true });
+            apply();
+        };
+
+        const find = () => {
+            let best = null;
+            for (const el of document.querySelectorAll('div, main, section')) {
+                const oy = getComputedStyle(el).overflowY;
+                if (oy !== 'auto' && oy !== 'scroll' && oy !== 'overlay') continue;
+                if (el.clientHeight <= 300) continue;
+                if (el.scrollHeight <= el.clientHeight + 400) continue;
+                if (!best || el.scrollHeight > best.scrollHeight) best = el;
+            }
+            if (best && best !== container) {
+                container = best;
+                watch();
+            }
+        };
+
+        // Poll until the conversation view exists (the SPA builds it after
+        // load), backing off once it's clear there is no long list yet; the
+        // interval also re-detects after view swaps that replace the node.
+        let misses = 0;
+        const tick = () => {
+            if (!container || !container.isConnected) {
+                find();
+                misses = misses > 30 ? 30 : misses + 1;
+            }
+            setTimeout(tick, misses >= 30 ? 5000 : 1000);
+        };
+        setTimeout(tick, 1000);
     })();
     """
 
@@ -2626,12 +2713,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // MARK: - WKNavigationDelegate (page load)
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        // A successful load proves the web content process is alive again,
+        // so a fresh termination is worth one more automatic recovery.
+        webContentTerminations = 0
         dismissLoadingOverlay()
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         dismissLoadingOverlay()
     }
+
+    /// Very long conversations can push the WebKit web content process over
+    /// its memory limit; the system kills it and the window would otherwise
+    /// stay blank forever. Reload automatically (bounded, so a genuine crash
+    /// loop surfaces instead of silently thrashing).
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        webContentTerminations += 1
+        NSLog("DSHWebView web content process terminated (%d)", webContentTerminations)
+        guard webContentTerminations <= 3 else {
+            showError("网页进程因内存不足被系统终止，已多次自动恢复失败。请重启应用，或新开一个会话以减小当前会话体积。")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak webView] in
+            webView?.reload()
+        }
+    }
+
+    private var webContentTerminations = 0
 
     private func showError(_ message: String) {
         let alert = NSAlert()
