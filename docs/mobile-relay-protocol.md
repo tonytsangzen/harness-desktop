@@ -28,11 +28,11 @@ Host 连上 `/relay/v1/host` 后，第一条消息必须是注册：
 
 ```json
 { "v": 1, "type": "control", "kind": "register",
-  "body": { "hostId": "h_…", "hostName": "Tony-MBP", "dshVersion": "0.1.0-rc.6",
+  "body": { "hostId": "0123456789012", "hostName": "Tony-MBP", "dshVersion": "0.1.0-rc.6",
             "pin": "814304", "token": "ht_…" } }
 ```
 
-- `hostId`：**壳生成的高熵设备 ID**（32 字节 CSPRNG，`h_` 前缀 + 64 位 hex，UserDefaults 持久化，见 §2.5）。首次注册即携带，中继将其作为 Host 标识（未知 ID 直接建号，已知 ID 复用并刷新 token/PIN）。
+- `hostId`：**壳生成的 13 位纯数字设备 ID**（设备信息派生，见 §2.3）。首次注册即携带，中继将其作为 Host 标识（未知 ID 直接建号，已知 ID 复用并刷新 token/PIN）。
 - `pin`（可选）：**固定配对 PIN**。壳在首次启动随机生成并持久化（UserDefaults），每次注册都携带；中继将其作为该 Host 的长期 PIN（`pinExpiresAt: 0`，无过期、可重复使用，配对失败 5 次锁 15 分钟）。不带 `pin` 且 Host 已有固定 PIN 时保持原值；从未设置过则回退短时效 PIN。可在「设置…」中修改。**弱 PIN 会被拒绝**（`000000`、`123456`、连续/相同数字等，见 §5 `weak-pin`）。
 - `token`（可选）：**上次注册拿到的 hostToken**（壳持久化于 UserDefaults）。**安全约束**：`hostId` 已存在于中继时，注册必须携带有效 `token`，否则中继拒绝（`host-conflict`）——防止任何知道 hostId 的人匿名重注册劫持 Host（踢掉真 bridge、截获设备流量）。全新 hostId（首次注册/中继重启后）无此要求。
 
@@ -40,7 +40,7 @@ Host 连上 `/relay/v1/host` 后，第一条消息必须是注册：
 
 ```json
 { "v": 1, "type": "control", "kind": "registered",
-  "body": { "hostId": "h_…", "hostToken": "ht_…",
+  "body": { "hostId": "0123456789012", "hostToken": "ht_…",
              "pin": "814304", "pinExpiresAt": 1755300000000 } }
 ```
 
@@ -59,7 +59,7 @@ Host 连上 `/relay/v1/host` 后，第一条消息必须是注册：
 
 ```
 POST /relay/v1/pair
-{ "deviceId": "h_…", "pin": "814304" }
+{ "deviceId": "0123456789012", "pin": "814304" }
 ```
 
 - `deviceId` 来自电脑端二维码（`device=` 参数）或手动输入的设备码；`pin` 在电脑端显示。
@@ -67,7 +67,7 @@ POST /relay/v1/pair
 成功：
 
 ```json
-{ "hostId": "h_…", "deviceId": "d_5a2c…",
+{ "hostId": "0123456789012", "deviceId": "d_5a2c…",
   "sessionToken": "st_…", "sessionExpiresAt": 1755386400000,
   "refreshToken": "rt_…" }
 ```
@@ -86,7 +86,7 @@ POST /relay/v1/pair
 
 ### 2.3 设备 ID 与二维码（壳生成）
 
-- **设备 ID（hostId）**：**32 字节 CSPRNG 随机**（`h_` + 64 位 hex，~256 bits 熵），UserDefaults 持久化，**跨启动稳定**，作为中继 Host 标识。不再由设备信息派生（旧版 13 位数字可从公开机器信息推导，攻击者获知后即可尝试劫持注册）。
+- **设备 ID（hostId）**：**13 位纯数字**，由设备信息派生（`SHA-256(机器名 | IOPlatformUUID)` 取前 8 字节 mod 10^13），**跨启动稳定、无需持久化**，作为中继 Host 标识。ID 本身可从公开机器信息推导，防劫持由注册 token 约束承担（见上节 `token` / `host-conflict`），不依赖 ID 熵。
 - **二维码内容**（壳端生成，`relay://<relay-host>/pair?device=<hostId>`）：仅含中继地址与设备 ID，**不含 PIN**。手机扫码得到中继地址 + 设备码，PIN 需在电脑端查看输入。
 - 点击「远程连接…」流程：生成设备 ID + 二维码 → spawn bridge（`--device-id <ID>` 连接中继注册）→ **注册成功**（收到 registered）才弹出配对窗口（二维码 + PIN + 设备码）；12 秒内未注册成功 → 提示「中继服务器不可用」并停止 bridge。
 
@@ -191,7 +191,9 @@ Host 与 Device 的 WSS 均为**双向 JSON 文本帧**：
 
 **`http-reply`**（Host→Relay→Device）
 - `id` 回显请求；`status` = 上游状态码；`body.headers` = 响应头（content-type、location）；`body.body` = 响应体 **base64**。
-- 代理失败：`status=502`，body 为错误文本。
+- **大响应分片**：超过 ~192 KiB 的响应由 bridge 拆成多条 `http-reply` 帧发送，`body.part = {index, total}`（index 从 0 起）；`headers` 只随 part 0 携带，各帧 `status` 相同。Device 按 id 重组，收齐 `total` 片后合并 body。分片发送配合 Device 侧的**空闲超时**（见 §4）：只要分片持续到达，传输就不会被总时长上限掐断。
+- **中途失败**：`body.abort = true`（status=502），Device 立即以 502 结束该请求。
+- 代理失败（小响应）：单帧 `status=502`，body 为错误文本。
 
 **`ping` / `pong`**
 - 双方每 30s 发 `ping`（`{}` 即可），对端回 `pong`；90s 无任何帧视为死链，中继/客户端主动断开并走重连。
@@ -199,8 +201,9 @@ Host 与 Device 的 WSS 均为**双向 JSON 文本帧**：
 ### 3.2 多路复用与背压
 
 - 单条 WSS 上多 channel 并行（每会话一个 mux channel、每 RPC 一个 channel）。
-- 中继按 channel 维护队列；队列上限 1024 帧（超出丢弃最旧并给该 channel 发 `sse-close {reason:"overflow"}` 或 `rpc-reply {transport:true, error:{code:"overflow"}}`）。
-- 大帧：单帧 body 超过 1 MiB 时由发送方分片为多条 `sse-frame`（`body.part = {index, total}`），接收方按 channel 重组。
+- 中继每条隧道一个发送队列（1024 帧）。**队列打满（慢消费者）或写超时（10s）时关闭该隧道**——静默丢帧会让对端永远等不到应答，关隧道触发两端干净重连反而恢复更快。
+- 大帧：大响应体由 bridge 以 `body.part = {index, total}` 分片发送（`http-reply` 分片见 §3.1）；单帧上限由中继 `SetReadLimit`（8 MiB）约束。
+- 中继 ping 每 30s；90s 无任何入站帧判定死链（pong / 任意帧均会刷新）。
 
 ### 3.3 事件子集（App 消费清单）
 
@@ -224,8 +227,12 @@ host 帧：`session/create`、`session/destroy`、`host/status`（running 翻转
 ```
 Host:
   connect(no auth) → register → [registered: hostToken] → 隧道就绪
-  断线 → 指数退避(1s,2s,4s…max 60s) 重连，带 Authorization: Bearer hostToken
+  断线 → 指数退避(1s,2s,4s…max 10s) 重连，带 Authorization: Bearer hostToken
   重连成功 → 中继校验 hostToken → 直接恢复隧道（App 侧收 host/online 事件）
+  僵尸接管：若中继上同 hostId 的旧隧道已沉默超过 staleHostAfter（45s，即
+  连 30s 一次的 ping 都不再应答，典型为 TCP 半开/睡眠唤醒），持有效
+  hostToken 的重连**直接顶替**旧隧道，不再等 90s 死链判定；若旧隧道仍然
+  活跃则拒绝（防重复 bridge 进程互踢）
 
 Device:
   connect(Authorization: Bearer sessionToken)
