@@ -1,5 +1,15 @@
 ## [1.2.1] - 2026-09-06
 
+### 新增（手机 ↔ 桌面隧道端到端加密、压缩、聚合）
+
+远程流量此前经云中继明文转发（WSS 只保护到中继为止）。现在 bridge 与 App 在流 payload 上协商端到端记录层，中继只见密文与流元数据：
+
+- **端到端加密**：AES-256-GCM；密钥 `HKDF-SHA256(e2eSecret, salt=hostId)`，`e2eSecret` 是桌面壳生成并持久化的 32 字节随机数——经 `--e2e-secret` 传给 bridge、经配对二维码 `e2e=` 离线交给 App，中继不可见。nonce 按方向计数器递增，AAD 绑定记录头
+- **协商**：bridge 在每条流的第一个 payload 注入 HELLO 记录；App 解出后回 HELLO 并开始双向密封。首 payload 非 `E2E1` 开头即保持明文——老 App/老桌面零破坏；解密失败直接关流，绝不向 dsh/WebView 透传垃圾
+- **压缩**：payload ≥ 64B 先 deflate-raw（命中才采用）
+- **聚合**：小 TCP 读写按 ~4ms 窗口合并；多流记录再按 ~3ms 聚合为 `stream-batch` 帧（relay 逐项路由，单帧最多 128 项）——页面加载的数十个小帧合并为大帧，显著降低 WSS 消息数与中继转发开销
+- **实现**：bridge（Node crypto/zlib）、App（`cryptography` 包 + dart:io zlib，含 Node↔Dart 黄金向量互操作单测）、relay `stream-batch` 路由；三端桌面壳生成/持久化 `e2eSecret` 并写入二维码；协议文档 §3/§4 同步。**部署注意：聚合需配套升级 relay**（`stream-batch` 新帧）
+
 ### 修复（手机端首次连接任务列表不刷新 / dsh 鉴权）
 
 dsh 的浏览器会话 cookie 与请求的 Host authority 逐请求绑定（cookie 名与签名 payload 均含 `sha256(Host)`），而手机端本地代理此前只改写每条 TCP 连接**第一条请求**的 Host——HTTP keep-alive 复用连接上的后续请求（含 303 换 cookie 的重定向）带着代理自身端口到达 dsh，cookie 校验必然失败，WebView 直接显示 `401 dsh web authentication required`。桌面端本地直连 authority 恒定，因此从未复现。

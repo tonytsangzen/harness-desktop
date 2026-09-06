@@ -22,6 +22,7 @@ class _PairingPageState extends State<PairingPage> {
   String _deviceId = '';
   String? _lan; // optional "ip:port" for direct LAN connect (from the QR)
   String? _dshToken; // dsh process token used to mint the browser cookie
+  String? _e2eSecret; // tunnel E2E secret (shared via QR, relay-blind)
   int _dshPort = 3080;
 
   Future<void> _submit() async {
@@ -41,6 +42,7 @@ class _PairingPageState extends State<PairingPage> {
         pin: pin,
         lan: _lan,
         dshToken: _dshToken,
+        e2eSecret: _e2eSecret,
         dshPort: _dshPort,
       );
       if (mounted) Navigator.of(context).pushReplacementNamed('/remote');
@@ -79,6 +81,7 @@ class _PairingPageState extends State<PairingPage> {
       _scanning = false;
       _lan = uri.queryParameters['lan'];
       _dshToken = uri.queryParameters['dshToken'];
+      _e2eSecret = uri.queryParameters['e2e'];
       _dshPort = int.tryParse(uri.queryParameters['dshPort'] ?? '') ?? 3080;
       _relay.text = '$scheme://${uri.authority}';
     });

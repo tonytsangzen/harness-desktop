@@ -18,6 +18,7 @@
 
 #include <climits>
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -1296,9 +1297,37 @@ std::string QueryEncode(const std::string& value) {
     return out;
 }
 
+// Stable end-to-end tunnel secret: random 32 bytes generated on first launch
+// and persisted next to the pin. Handed to the bridge (--e2e-secret) and
+// carried in the pairing QR (e2e=), so the app and the bridge derive a shared
+// key the relay never sees.
+std::string E2ESecret() {
+    const std::string path = ConfigDir() + "/e2esecret";
+    if (auto existing = ReadFileText(path); existing.size() >= 40) return existing;
+    std::string secret;
+    if (FILE *urandom = fopen("/dev/urandom", "rb")) {
+        unsigned char raw[32] = {};
+        if (fread(raw, 1, sizeof(raw), urandom) != sizeof(raw)) {
+            memset(raw, 0, sizeof(raw));
+        }
+        fclose(urandom);
+        static const char alphabet[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        for (unsigned char b : raw) {
+            secret += alphabet[b & 63];
+            secret += alphabet[(b >> 2) & 63];
+            secret += alphabet[(b >> 4) & 63];
+            secret += alphabet[(b >> 6) & 63];
+        }
+        secret.resize(43); // 32 bytes -> 43 base64url chars
+        WriteFileText(path, secret);
+    }
+    return secret;
+}
+
 std::string PairingQRContent(const std::string& relayUrl, const std::string& deviceId,
                              const std::string& lanAddress, unsigned short dshPort,
-                             const std::string& dshToken) {
+                             const std::string& dshToken, const std::string& e2eSecret) {
     std::string scheme = "https";
     std::string host = relayUrl;
     size_t sep = host.find("://");
@@ -1312,6 +1341,7 @@ std::string PairingQRContent(const std::string& relayUrl, const std::string& dev
                      "&scheme=" + scheme + "&dshPort=" + std::to_string(dshPort);
     if (!lanAddress.empty()) qr += "&lan=" + lanAddress;
     if (!dshToken.empty()) qr += "&dshToken=" + QueryEncode(dshToken);
+    if (!e2eSecret.empty()) qr += "&e2e=" + QueryEncode(e2eSecret);
     return qr;
 }
 
@@ -1417,7 +1447,8 @@ void MainWindow::OnMobileRemoteActivate(GtkWidget* /*item*/, gpointer userData) 
         if (end != std::string::npos) dshToken.resize(end);
     }
     std::string qrContent = PairingQRContent(self->mobileRelayUrl_, deviceId, lan,
-                                              ServerManager::ActivePort(), dshToken);
+                                              ServerManager::ActivePort(), dshToken,
+                                              E2ESecret());
     std::string qrPNG = GenerateQRPNG(qrContent);
     if (qrPNG.empty()) {
         self->ShowError(self->IsChinese() ? "生成配对二维码失败。"
@@ -1467,10 +1498,12 @@ void MainWindow::StartMobileBridge(const std::string& relay, const std::string& 
     // re-registering — the relay refuses anonymous re-registration of an
     // existing hostId (hijack protection).
     std::string hostToken = ReadFileText(ConfigDir() + "/hosttoken");
+    const std::string e2eSecret = E2ESecret();
     std::vector<const char*> argStorage = {
         node.c_str(), bridge.c_str(), "--relay", relay.c_str(),
         "--dsh-port", portStr.c_str(), "--device-id", deviceId.c_str(),
         "--pin", pin.c_str(),
+        "--e2e-secret", e2eSecret.c_str(),
     };
     if (!hostToken.empty()) {
         argStorage.push_back("--host-token");

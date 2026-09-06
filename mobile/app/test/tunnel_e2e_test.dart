@@ -19,6 +19,9 @@ import 'package:dsh_mobile/core/web_proxy.dart';
 
 const _pin = '864209';
 
+/// 32 zero bytes base64url — the QR would carry the same value to the app.
+const _e2eSecret = 'QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE';
+
 Future<bool> _hasBin(String bin) async {
   final result = await Process.run('which', [bin]);
   return result.exitCode == 0;
@@ -113,6 +116,8 @@ void main() {
           hostId,
           '--pin',
           _pin,
+          '--e2e-secret',
+          _e2eSecret,
           '--lan-port',
           '$lanPort',
         ],
@@ -141,6 +146,8 @@ void main() {
       final client = RelayClient(
         relayBase: 'http://127.0.0.1:$relayPort',
         sessionToken: sessionToken,
+        e2eSecret: _e2eSecret,
+        hostId: hostId,
       );
       addTearDown(client.close);
       await client.connect();
@@ -312,6 +319,7 @@ class _Browser {
   }
 
   void _onData(List<int> bytes) {
+    print('[browser] +${bytes.length}B ${utf8.decode(bytes, allowMalformed: true).replaceAll('\r\n', '|')}');
     _data.add(bytes);
     final buffered = _data.toBytes();
     final headerEnd = _headerEnd(buffered);

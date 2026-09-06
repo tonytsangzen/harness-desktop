@@ -114,6 +114,16 @@ Relay 验证 `streamId` 非空、`port` 在 `1..65535`，随后绑定 `hostId/st
 
 Relay 只使用 `hostId + streamId` 查找目标设备，原样转发 `data`。它不得 base64 解码、记录、截断或根据内容改变路由。双方可按 TCP `data` 事件大小自行分块；单个 WSS 消息受 relay 8 MiB 读取上限约束。
 
+### `stream-batch`
+
+任一端 -> 对端：把多个流的 payload 聚合进一帧，减少小包 WSS 消息数：
+
+```json
+{"v":1,"type":"stream-batch","items":[{"id":"stream_abc","data":"AAECf4D+/w=="},{"id":"stream_def","data":"…"}]}
+```
+
+Relay 逐项按独立 `stream-data` 路由（`1..128` 项，空 `id` 跳过）。仅聚合数据；`stream-close` 仍单独成帧，且发送方必须先冲刷聚合队列再发 close。
+
 ### `stream-close`
 
 任一端 -> 对端：
@@ -123,6 +133,24 @@ Relay 只使用 `hostId + streamId` 查找目标设备，原样转发 `data`。�
 ```
 
 Relay 转发后删除 stream 绑定。`reason` 仅用于诊断，不是 dsh 业务错误码。
+
+### E2E 记录层（端到端加密 + 压缩 + 聚合）
+
+`data`/`items[].d` 的内容在两端（bridge 与 App）之间可选地升级为 **E2E 记录**，中继仍只做不透明转发：
+
+```
+'E2E1' | flags | nonce(12) | AES-256-GCM ciphertext(+16B tag)
+flags:  bit0 = payload 为 deflate-raw 压缩，bit1 = 发送方支持 stream-batch
+nonce:  direction(4 BE: 1=bridge→device, 2=device→bridge) || counter(8 BE)，按方向递增
+AAD:    magic | flags
+```
+
+- **密钥**：`HKDF-SHA256(ikm = e2eSecret, salt = hostId, info = "dsh-e2e-v1", L = 32)`。`e2eSecret` 是桌面壳生成并持久化的 32 字节随机数，通过 `--e2e-secret` 传给 bridge、经配对二维码的 `e2e=` 参数离线交给 App——中继永远看不到
+- **协商**：持有密钥的一端在每个 stream 的**第一个 payload** 注入 HELLO 记录（空 payload，flags 含 bit1）。对端解出 HELLO 即确认并回 HELLO，随后双向密封；第一个 payload 非 `E2E1` 开头则该流保持明文（legacy 对端零破坏）；解密失败（密钥不符/被篡改）直接关闭该流，绝不向 dsh/WebView 透传垃圾
+- **压缩**：payload ≥ 64B 时先 deflate-raw，更小才置 bit0
+- **聚合**：小 TCP 读写按 ~4ms 窗口合并为一条记录；多条流的记录再按 ~3ms 聚合为 `stream-batch`。单向未确认前不启用聚合
+
+安全边界：中继不可见 payload 内容，但可见流元数据（streamId、字节数、条目数）；主动丢弃 HELLO 可降级为明文（防御目标是被动窥视与误配日志，不假设中继恶意）。
 
 ### `ping` / `pong`
 
@@ -138,7 +166,7 @@ Flutter `WebProxy` 绑定 `127.0.0.1` 的本地端口。每个 accepted TCP sock
 
 代理**不做任何 HTTP 头改写**，请求 body、HTTP 响应、WebSocket upgrade 和所有字节均透明复制。历史上代理曾把首个请求的 `Host` 改写为 `127.0.0.1:3080` 并删除 `Origin`，但 HTTP keep-alive 复用连接上的后续请求无法逐一改写；而 dsh 的浏览器会话 cookie 与请求的 Host authority 绑定（cookie 名与签名 payload 均含 `sha256(Host)`），每次请求都会重新校验——authority 不一致的请求会得到 `401 dsh web authentication required`，这正是远程端报错的根源。origin 一致后，每个请求的 `Host`/`Origin`/cookie authority 天然一致，且满足 dsh 的 loopback + same-origin 请求围栏。代理不缓存、压缩解码、ETag 重验证或注入 HTML。
 
-新版 dsh 的根页面需要先用启动时生成的 `token` 换取浏览器 cookie。桌面端把 `dshToken` 和实际 `dshPort` 放入配对二维码；App 配对后首次加载本地代理的 `/?token=<dshToken>`，dsh 返回的 `303`、`Set-Cookie` 和后续重定向按 HTTP/TCP 原样通过代理。该 token 只属于 dsh（进程级，`dsh web` 每次重启都会轮换），不是 relay 的 `sessionToken`；relay 不读取或验证它。dsh 的 cookie 签名密钥持久化在 dsh profile 中，因此固定端口 + 有效 cookie 时，dsh 重启后手机无需重新配对即可恢复。
+新版 dsh 的根页面需要先用启动时生成的 `token` 换取浏览器 cookie。桌面端把 `dshToken`、E2E `e2eSecret` 和实际 `dshPort` 放入配对二维码；App 配对后首次加载本地代理的 `/?token=<dshToken>`，dsh 返回的 `303`、`Set-Cookie` 和后续重定向按 HTTP/TCP 原样通过代理。该 token 只属于 dsh（进程级，`dsh web` 每次重启都会轮换），不是 relay 的 `sessionToken`；relay 不读取或验证它。dsh 的 cookie 签名密钥持久化在 dsh profile 中，因此固定端口 + 有效 cookie 时，dsh 重启后手机无需重新配对即可恢复。
 
 LAN 模式由 bridge 暴露 `0.0.0.0:13080`，是同一个 dsh TCP 端口的透明 TCP 转发；App 仍通过本地 `WebProxy` 访问它，因此 LAN 和 relay 的 WebView 行为一致。
 

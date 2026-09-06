@@ -18,6 +18,14 @@ import (
 	"github.com/tonytsangzen/harness-desktop/mobile/relay/store"
 )
 
+// BatchItem is one pre-routed stream-data payload inside a stream-batch
+// frame. The relay treats it exactly like a standalone stream-data frame;
+// batching is a transport optimization between the two endpoints.
+type BatchItem struct {
+	StreamID string `json:"id"`
+	Data     string `json:"d,omitempty"`
+}
+
 // Frame is the relay control/transport envelope. Data is an opaque base64
 // encoded chunk from the relay's point of view; only the two endpoints know
 // whether it contains HTTP, WebSocket, or any other application protocol.
@@ -27,10 +35,11 @@ type Frame struct {
 	Kind string          `json:"kind,omitempty"`
 	Body json.RawMessage `json:"body,omitempty"`
 	// Stream fields are transport-only. The relay never interprets Data.
-	StreamID string `json:"streamId,omitempty"`
-	Port     int    `json:"port,omitempty"`
-	Data     string `json:"data,omitempty"` // base64 encoded TCP bytes
-	Reason   string `json:"reason,omitempty"`
+	StreamID string       `json:"streamId,omitempty"`
+	Port     int          `json:"port,omitempty"`
+	Data     string       `json:"data,omitempty"` // base64 encoded TCP bytes
+	Reason   string       `json:"reason,omitempty"`
+	Items    []BatchItem  `json:"items,omitempty"`
 }
 
 const (
@@ -619,6 +628,8 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 			if f.Type == "stream-close" {
 				s.hub.unbindStream(host.ID, f.StreamID)
 			}
+		case "stream-batch":
+			s.routeBatch(host.ID, f, true)
 		default:
 			// ignore unknown host frames
 		}
@@ -673,10 +684,40 @@ func (s *server) handleDevice(w http.ResponseWriter, r *http.Request) {
 			if f.Type == "stream-close" {
 				s.hub.unbindStream(sess.HostID, f.StreamID)
 			}
+		case "stream-batch":
+			s.routeBatch(sess.HostID, f, false)
 		default:
 			// ignore
 		}
 	})
+}
+
+// routeBatch forwards each item of a stream-batch exactly like a standalone
+// stream-data frame. Batching is a transport optimization between the two
+// endpoints; the relay never interprets the payloads.
+func (s *server) routeBatch(hostID string, f Frame, hostToDevice bool) {
+	if len(f.Items) == 0 || len(f.Items) > 128 {
+		return
+	}
+	for _, item := range f.Items {
+		if item.StreamID == "" {
+			continue
+		}
+		sub := Frame{V: 1, Type: "stream-data", StreamID: item.StreamID, Data: item.Data}
+		if hostToDevice {
+			dev := s.hub.streamDevice(hostID, item.StreamID)
+			if dev == "" {
+				continue
+			}
+			if code := s.hub.toDevice(dev, sub); code != "" {
+				log.Printf("host->device: batch route failed stream=%q code=%q", truncate(item.StreamID, 12), code)
+			}
+		} else {
+			if code := s.hub.toHost(hostID, sub); code != "" {
+				log.Printf("device->host: batch route failed stream=%q code=%q", truncate(item.StreamID, 12), code)
+			}
+		}
+	}
 }
 
 func truncate(s string, n int) string {

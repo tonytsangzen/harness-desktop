@@ -726,7 +726,8 @@ final class MobileRemoteManager {
         // silently disabled Remote Connect on macOS for a whole release).
         p.executableURL = URL(fileURLWithPath: nodePath)
         var args = [bridgePath.path, "--relay", relayURL, "--dsh-port", "\(dshPort)",
-                    "--device-id", deviceID, "--pin", StablePairingPin()]
+                    "--device-id", deviceID, "--pin", StablePairingPin(),
+                    "--e2e-secret", E2ESecret()]
         // Persisted hostToken lets a bridge restart reconnect by token instead
         // of re-registering — the relay refuses anonymous re-registration of an
         // existing hostId (hijack protection). Only reuse the token when it was
@@ -880,6 +881,29 @@ func isWeakPin(_ pin: String) -> Bool {
     return ["123123", "112233", "121212", "111222", "000001", "123321"].contains(pin)
 }
 
+/// Stable end-to-end tunnel secret: random 32 bytes generated on first
+/// launch, then persisted. Handed to the bridge (`--e2e-secret`) and carried
+/// in the pairing QR (`e2e=`), so the app and the bridge derive a shared key
+/// the relay never sees.
+func E2ESecret() -> String {
+    let key = "mobileE2ESecret"
+    if let existing = UserDefaults.standard.string(forKey: key),
+       existing.count >= 40 {
+        return existing
+    }
+    var bytes = [UInt8](repeating: 0, count: 32)
+    let result = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+    if result != errSecSuccess {
+        for i in 0..<bytes.count { bytes[i] = UInt8.random(in: 0...255) }
+    }
+    let secret = Data(bytes).base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-")
+        .replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+    UserDefaults.standard.set(secret, forKey: key)
+    return secret
+}
+
 /// The device ID used as the host ID on the relay: a stable 13-digit number
 /// derived from machine info (name + platform UUID). Registration hijacking is
 /// defused by the relay's hostToken check, not by ID entropy.
@@ -922,7 +946,8 @@ private func queryEncode(_ value: String) -> String {
 }
 
 func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?,
-                      dshPort: UInt16, dshToken: String?) -> String {
+                      dshPort: UInt16, dshToken: String?,
+                      e2eSecret: String?) -> String {
     var host = relayURL
     var scheme = "https"
     if let url = URL(string: relayURL) {
@@ -933,6 +958,7 @@ func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?,
     var qr = "relay://\(host)/pair?device=\(deviceID)&scheme=\(scheme)&dshPort=\(dshPort)"
     if let lan = lanAddress { qr += "&lan=\(lan)" }
     if let token = dshToken, !token.isEmpty { qr += "&dshToken=\(queryEncode(token))" }
+    if !e2eSecret!.isEmpty { qr += "&e2e=\(queryEncode(e2eSecret!))" }
     return qr
 }
 
@@ -2506,7 +2532,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 .first(where: { $0.name == "token" })?.value
         }
         let qrContent = PairingQRContent(relayURL: relay, deviceID: deviceID, lanAddress: lan,
-                                         dshPort: server.activePort, dshToken: dshToken)
+                                         dshPort: server.activePort, dshToken: dshToken,
+                                         e2eSecret: E2ESecret())
         guard let qrPNG = GenerateQRPNG(content: qrContent) else {
             setRemoteStatus(s.mobileRemoteFailed, color: .systemRed)
             remoteSwitchRef?.state = .off

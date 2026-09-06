@@ -76,7 +76,7 @@ class AppState extends ChangeNotifier {
     currentConnection = conn;
     notifyListeners();
     try {
-      await _attach(conn.relay, conn.sessionToken);
+      await _attach(conn);
     } finally {
       busy = false;
       notifyListeners();
@@ -126,6 +126,7 @@ class AppState extends ChangeNotifier {
     required String pin,
     String? lan,
     String? dshToken,
+    String? e2eSecret,
     int dshPort = 3080,
   }) async {
     busy = true;
@@ -141,6 +142,7 @@ class AppState extends ChangeNotifier {
         pairedAt: DateTime.now().millisecondsSinceEpoch,
         lan: lan,
         dshToken: dshToken,
+        e2eSecret: e2eSecret,
         dshPort: dshPort,
       );
       connections = [
@@ -154,7 +156,7 @@ class AppState extends ChangeNotifier {
       _log(
         'pair saved connection hostId=$deviceId total=${connections.length}',
       );
-      await _attach(relayBase, json['sessionToken'] as String);
+      await _attach(conn);
     } catch (e) {
       _log('pair FAILED: $e');
       rethrow;
@@ -180,6 +182,7 @@ class AppState extends ChangeNotifier {
         pairedAt: DateTime.now().millisecondsSinceEpoch,
         lan: conn.lan,
         dshToken: conn.dshToken,
+        e2eSecret: conn.e2eSecret,
         dshPort: conn.dshPort,
       );
       connections = [
@@ -191,7 +194,7 @@ class AppState extends ChangeNotifier {
       currentConnection = updated;
       await _saveConnections();
       _log('repair ok hostId=${conn.hostId}');
-      await _attach(conn.relay, json['sessionToken'] as String);
+      await _attach(updated);
     } catch (e) {
       _log('repair FAILED: $e');
       rethrow;
@@ -232,9 +235,14 @@ class AppState extends ChangeNotifier {
     return (jsonDecode(body) as Map).cast<String, dynamic>();
   }
 
-  Future<void> _attach(String relayBase, String token) async {
+  Future<void> _attach(SavedConnection conn) async {
     _closing = false;
-    final c = RelayClient(relayBase: relayBase, sessionToken: token);
+    final c = RelayClient(
+      relayBase: conn.relay,
+      sessionToken: conn.sessionToken,
+      e2eSecret: conn.e2eSecret,
+      hostId: conn.hostId,
+    );
     c.onStatus = (online) {
       _log('tunnel status online=$online');
       connected = online;
@@ -242,7 +250,7 @@ class AppState extends ChangeNotifier {
       if (online) {
         _reconnectAttempt = 0;
       } else {
-        _scheduleReconnect(c, relayBase, token);
+        _scheduleReconnect(conn);
       }
     };
     c.onFatal = (msg) {
@@ -284,7 +292,7 @@ class AppState extends ChangeNotifier {
   /// schedules from a torn-down client are invalidated by comparing it.
   int _generation = 0;
 
-  void _scheduleReconnect(RelayClient c, String relayBase, String token) {
+  void _scheduleReconnect(SavedConnection conn) {
     if (_reconnectTimer != null || _closing) return;
     // Capture the generation, not the client instance: _attach() replaces
     // `client` before it can fail, so comparing against `c` would cancel the
@@ -298,9 +306,9 @@ class AppState extends ChangeNotifier {
       _reconnectTimer = null;
       if (_closing || gen != _generation) return;
       _log('reconnecting tunnel…');
-      _attach(relayBase, token).catchError((Object e) {
+      _attach(conn).catchError((Object e) {
         _log('reconnect failed: $e');
-        _scheduleReconnect(c, relayBase, token);
+        _scheduleReconnect(conn);
       });
     });
   }
@@ -318,6 +326,7 @@ class SavedConnection {
     required this.pairedAt,
     this.lan,
     this.dshToken,
+    this.e2eSecret,
     this.dshPort = 3080,
   });
 
@@ -335,6 +344,10 @@ class SavedConnection {
   /// cookie by the first WebView request; it is not the relay session token.
   final String? dshToken;
 
+  /// End-to-end tunnel secret from the pairing QR (`e2e=`); shared with the
+  /// desktop bridge out-of-band so the relay cannot read stream payloads.
+  final String? e2eSecret;
+
   /// Actual dsh port for hosts whose desktop selected a non-default port.
   final int dshPort;
 
@@ -346,6 +359,7 @@ class SavedConnection {
     'pairedAt': pairedAt,
     if (lan != null) 'lan': lan,
     if (dshToken != null && dshToken!.isNotEmpty) 'dshToken': dshToken,
+    if (e2eSecret != null && e2eSecret!.isNotEmpty) 'e2eSecret': e2eSecret,
     'dshPort': dshPort,
   };
 
@@ -358,6 +372,7 @@ class SavedConnection {
         pairedAt: (json['pairedAt'] as num?)?.toInt() ?? 0,
         lan: json['lan'] as String?,
         dshToken: json['dshToken'] as String?,
+        e2eSecret: json['e2eSecret'] as String?,
         dshPort: (json['dshPort'] as num?)?.toInt() ?? 3080,
       );
 }
