@@ -272,6 +272,10 @@ lanWss.on("connection", (client, req) => {
 
 lanServer.listen(LAN_PORT, "0.0.0.0", () => {
   console.log(JSON.stringify({ event: "lan-ready", port: LAN_PORT }));
+}).on("error", (err) => {
+  // The LAN proxy is optional (relay tunnel still works); losing it to a
+  // busy/stale port must not kill the whole bridge.
+  console.log(JSON.stringify({ event: "lan-port-busy", port: LAN_PORT, error: String(err?.code || err) }));
 });
 
 let ws = null;

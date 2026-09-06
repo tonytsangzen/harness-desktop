@@ -713,14 +713,23 @@ final class MobileRemoteManager {
     }
 
     func start() {
+        NSLog("DSH bridge start: node=%@ bridge=%@ running=%d", nodePath, bridgePath.path, isRunning ? 1 : 0)
         guard !isRunning else { return }
         restartDelay = 2.0
         guard FileManager.default.isExecutableFile(atPath: nodePath),
               FileManager.default.fileExists(atPath: bridgePath.path) else {
+            NSLog("DSH bridge spawn guard failed: node exe=%d bridge exists=%d",
+                  FileManager.default.isExecutableFile(atPath: nodePath) ? 1 : 0,
+                  FileManager.default.fileExists(atPath: bridgePath.path) ? 1 : 0)
             DispatchQueue.main.async { self.onExit?() }
             return
         }
         let p = Process()
+        // Without executableURL, run() throws "The file doesn't exist." — the
+        // bridge then never spawns and Remote Connect reports the relay as
+        // unreachable after 12s (this line was lost in the 7c97129 rework and
+        // silently disabled Remote Connect on macOS for a whole release).
+        p.executableURL = URL(fileURLWithPath: nodePath)
         var args = [bridgePath.path, "--relay", relayURL, "--dsh-port", "\(dshPort)",
                     "--device-id", deviceID, "--pin", StablePairingPin()]
         if let dshURL = dshURL {
@@ -738,9 +747,12 @@ final class MobileRemoteManager {
             args += ["--host-token", tok]
         }
         p.arguments = args
-        p.standardOutput = Pipe()
-        p.standardError = FileHandle.nullDevice
-        let pipe = p.standardOutput as! Pipe
+        // Both streams feed the same line parser: consume() ignores non-JSON
+        // lines, and node writes crash stack traces to stderr — losing them
+        // (nullDevice) is how a dead bridge used to look like bad relay.
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard data.count > 0 else { return }
@@ -760,9 +772,11 @@ final class MobileRemoteManager {
         }
         process = p
         isRunning = true
+        NSLog("DSH bridge spawning args=%@", args.joined(separator: " "))
         do {
             try p.run()
         } catch {
+            NSLog("DSH bridge spawn FAILED: %@", String(describing: error))
             isRunning = false
             DispatchQueue.main.async { self.onExit?() }
         }

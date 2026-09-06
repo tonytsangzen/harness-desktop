@@ -2,6 +2,8 @@
 
 ### 修复（第二次启动报「中继服务器不可用」）
 
+- **bridge 从未被启动（macOS，主因）**：v1.2.1 重构远程桥 spawn 时意外丢失了 `Process.executableURL`——bridge 进程从未运行过，每次开远程 12 秒超时后误报中继不可用（spawn 失败原本被静默吞掉）。已恢复该行，并把 bridge 的 stderr 接入日志管道（此前指向 null 设备，崩溃无迹可循）；同时在应用日志中记录 spawn 参数与失败原因
+- **bridge 自身加固**：LAN 直连代理端口被占时不再拖垮整个 bridge（记录 `lan-port-busy` 事件并继续纯中继模式）
 - **token 重连被误判为失败**：bridge 持久化 hostToken 后，重启应用走 token 重连，relay 不会重发 `registered`（只发 `online`），而壳只认 `registered`——12 秒超时后误报中继不可用。现在三端都把 `online` 视为配对成功（用持久化的 token/PIN/设备 ID 重建配对信息）
 - **Linux/Windows 补上 hostToken 持久化**：此前只有 macOS 存 token，Linux/Windows 每次启动匿名重注册，会被 hijack 保护拒绝（部署新版 relay 后）——现在同样持久化并按 token 重连
 
