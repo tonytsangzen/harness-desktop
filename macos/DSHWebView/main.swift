@@ -912,8 +912,17 @@ func DeviceID() -> String {
 /// scheme (http for plaintext test relays, https otherwise) so the phone
 /// connects with a matching protocol. `lanAddress` (e.g. "192.168.1.5:3080")
 /// lets the phone prefer a direct LAN connection to this desktop's dsh web
-/// and only fall back to the cloud relay when it can't reach it.
-func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?) -> String {
+/// and only fall back to the cloud relay when it can't reach it. The dsh
+/// process token is included so the phone can mint the browser cookie required
+/// by newer dsh releases.
+private func queryEncode(_ value: String) -> String {
+    var allowed = CharacterSet.alphanumerics
+    allowed.insert(charactersIn: "-._~")
+    return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+}
+
+func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?,
+                      dshPort: UInt16, dshToken: String?) -> String {
     var host = relayURL
     var scheme = "https"
     if let url = URL(string: relayURL) {
@@ -921,8 +930,9 @@ func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?) -
         host = url.host ?? ""
         if let port = url.port { host += ":\(port)" }
     }
-    var qr = "relay://\(host)/pair?device=\(deviceID)&scheme=\(scheme)"
+    var qr = "relay://\(host)/pair?device=\(deviceID)&scheme=\(scheme)&dshPort=\(dshPort)"
     if let lan = lanAddress { qr += "&lan=\(lan)" }
+    if let token = dshToken, !token.isEmpty { qr += "&dshToken=\(queryEncode(token))" }
     return qr
 }
 
@@ -2491,7 +2501,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         // can prefer a direct connection and fall back to the relay).
         let deviceID = DeviceID()
         let lan = LocalLANAddress().map { "\($0):13080" }
-        let qrContent = PairingQRContent(relayURL: relay, deviceID: deviceID, lanAddress: lan)
+        let dshToken = server.authURL.flatMap { authURL in
+            URLComponents(url: authURL, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "token" })?.value
+        }
+        let qrContent = PairingQRContent(relayURL: relay, deviceID: deviceID, lanAddress: lan,
+                                         dshPort: server.activePort, dshToken: dshToken)
         guard let qrPNG = GenerateQRPNG(content: qrContent) else {
             setRemoteStatus(s.mobileRemoteFailed, color: .systemRed)
             remoteSwitchRef?.state = .off

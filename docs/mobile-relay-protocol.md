@@ -141,6 +141,12 @@ Flutter `WebProxy` 绑定 `127.0.0.1` 的本地临时端口。每个 accepted TC
 
 请求 body、HTTP 响应、WebSocket upgrade、WebSocket 帧和所有后续字节均透明复制。代理不缓存、压缩解码、ETag 重验证或注入 HTML。
 
+新版 dsh 的根页面需要先用启动时生成的 `token` 换取浏览器 cookie。桌面端把
+`dshToken` 和实际 `dshPort` 放入配对二维码；App 配对后首次加载本地代理的
+`/?token=<dshToken>`，dsh 返回的 `303`、`Set-Cookie` 和后续重定向仍按 HTTP/TCP
+原样通过代理。该 token 只属于 dsh，不是 relay 的 `sessionToken`；relay 不读取或
+验证它。
+
 LAN 模式由 bridge 暴露 `0.0.0.0:13080`，是同一个 dsh TCP 端口的透明 TCP 转发；App 仍通过本地 `WebProxy` 访问它，因此 LAN 和 relay 的 WebView 行为一致。
 
 ## 5. 连接生命周期

@@ -86,7 +86,8 @@ class _WebviewPageState extends State<WebviewPage> {
   }
 
   void _launchWith(PortBackend backend) {
-    final proxy = WebProxy(backend);
+    final connection = widget.state.currentConnection;
+    final proxy = WebProxy(backend, remotePort: connection?.dshPort ?? 3080);
     _proxy = proxy;
     proxy
         .start()
@@ -95,7 +96,18 @@ class _WebviewPageState extends State<WebviewPage> {
           final controller = _buildController();
           _controller = controller;
           setState(() {});
-          controller.loadRequest(Uri.parse('http://127.0.0.1:${proxy.port}/'));
+          final token = connection?.dshToken;
+          controller.loadRequest(
+            Uri(
+              scheme: 'http',
+              host: '127.0.0.1',
+              port: proxy.port,
+              path: '/',
+              queryParameters: token == null || token.isEmpty
+                  ? null
+                  : {'token': token},
+            ),
+          );
         })
         .catchError((Object e) {
           if (mounted) setState(() => _error = '启动本地代理失败: $e');

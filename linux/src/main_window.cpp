@@ -713,7 +713,11 @@ bool MainWindow::DrainServerLogs() {
                 // `dsh web: http://127.0.0.1:3080/?token=…`. Newer dsh builds
                 // gate `/` and `/api/*` behind a session cookie granted on
                 // that URL — the plain `/` would answer 401 (blank window).
-                if (line.rfind("dsh web: ", 0) == 0) authUrl_ = line.substr(9);
+                if (line.rfind("dsh web: ", 0) == 0) {
+                    authUrl_ = line.substr(9);
+                    const auto end = authUrl_.find_first_of(" \t");
+                    if (end != std::string::npos) authUrl_.resize(end);
+                }
                 last = line;
             }
         }
@@ -1274,9 +1278,27 @@ std::string StablePairingPin() {
 // (http for plaintext test relays, https otherwise) so the phone connects
 // with a matching protocol. `lanAddress` (e.g. "192.168.1.5:13080") lets the
 // phone prefer a direct LAN connection to this desktop's dsh web and only
-// fall back to the cloud relay when it can't reach it.
+// fall back to the cloud relay when it can't reach it. The dsh token is included
+// so the phone can mint the browser cookie required by newer dsh releases.
+std::string QueryEncode(const std::string& value) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : value) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+    }
+    return out;
+}
+
 std::string PairingQRContent(const std::string& relayUrl, const std::string& deviceId,
-                             const std::string& lanAddress) {
+                             const std::string& lanAddress, unsigned short dshPort,
+                             const std::string& dshToken) {
     std::string scheme = "https";
     std::string host = relayUrl;
     size_t sep = host.find("://");
@@ -1286,8 +1308,10 @@ std::string PairingQRContent(const std::string& relayUrl, const std::string& dev
     }
     size_t slash = host.find('/');
     if (slash != std::string::npos) host = host.substr(0, slash);
-    std::string qr = "relay://" + host + "/pair?device=" + deviceId + "&scheme=" + scheme;
+    std::string qr = "relay://" + host + "/pair?device=" + deviceId +
+                     "&scheme=" + scheme + "&dshPort=" + std::to_string(dshPort);
     if (!lanAddress.empty()) qr += "&lan=" + lanAddress;
+    if (!dshToken.empty()) qr += "&dshToken=" + QueryEncode(dshToken);
     return qr;
 }
 
@@ -1385,7 +1409,15 @@ void MainWindow::OnMobileRemoteActivate(GtkWidget* /*item*/, gpointer userData) 
     std::string deviceId = DeviceID();
     std::string lan = LocalLANAddress();
     if (!lan.empty()) lan += ":13080";
-    std::string qrContent = PairingQRContent(self->mobileRelayUrl_, deviceId, lan);
+    std::string dshToken;
+    const auto tokenPos = self->authUrl_.find("?token=");
+    if (tokenPos != std::string::npos) {
+        dshToken = self->authUrl_.substr(tokenPos + 7);
+        const auto end = dshToken.find_first_of("&#");
+        if (end != std::string::npos) dshToken.resize(end);
+    }
+    std::string qrContent = PairingQRContent(self->mobileRelayUrl_, deviceId, lan,
+                                              ServerManager::ActivePort(), dshToken);
     std::string qrPNG = GenerateQRPNG(qrContent);
     if (qrPNG.empty()) {
         self->ShowError(self->IsChinese() ? "生成配对二维码失败。"

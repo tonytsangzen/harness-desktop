@@ -21,6 +21,8 @@ class _PairingPageState extends State<PairingPage> {
   bool _fromQR = false; // relay address came from the QR code
   String _deviceId = '';
   String? _lan; // optional "ip:port" for direct LAN connect (from the QR)
+  String? _dshToken; // dsh process token used to mint the browser cookie
+  int _dshPort = 3080;
 
   Future<void> _submit() async {
     if (_deviceId.isEmpty || _relay.text.isEmpty) {
@@ -38,6 +40,8 @@ class _PairingPageState extends State<PairingPage> {
         deviceId: _deviceId,
         pin: pin,
         lan: _lan,
+        dshToken: _dshToken,
+        dshPort: _dshPort,
       );
       if (mounted) Navigator.of(context).pushReplacementNamed('/remote');
     } catch (e) {
@@ -67,13 +71,15 @@ class _PairingPageState extends State<PairingPage> {
     final scheme = (schemeParam == 'http' || schemeParam == 'https')
         ? schemeParam
         : (host == 'localhost' || host == '::1' || host.startsWith('127.')
-            ? 'http'
-            : 'https');
+              ? 'http'
+              : 'https');
     setState(() {
       _deviceId = device;
       _fromQR = true;
       _scanning = false;
       _lan = uri.queryParameters['lan'];
+      _dshToken = uri.queryParameters['dshToken'];
+      _dshPort = int.tryParse(uri.queryParameters['dshPort'] ?? '') ?? 3080;
       _relay.text = '$scheme://${uri.authority}';
     });
     _snack('已从二维码读取中继地址与设备 ID，请输入电脑上显示的 PIN 后确认');
@@ -92,15 +98,19 @@ class _PairingPageState extends State<PairingPage> {
           ? MobileScanner(
               onDetect: _onDetect,
               overlayBuilder: (_, _) => const Center(
-                child: Text('对准电脑上「远程连接」的二维码',
-                    style: TextStyle(color: Colors.white, fontSize: 16)),
+                child: Text(
+                  '对准电脑上「远程连接」的二维码',
+                  style: TextStyle(color: Colors.white, fontSize: 16),
+                ),
               ),
             )
           : ListView(
               padding: const EdgeInsets.all(24),
               children: [
-                const Text('1. 在电脑的 DeepSeek Harness 里打开「远程连接」，显示配对二维码和 PIN',
-                    style: TextStyle(fontSize: 15)),
+                const Text(
+                  '1. 在电脑的 DeepSeek Harness 里打开「远程连接」，显示配对二维码和 PIN',
+                  style: TextStyle(fontSize: 15),
+                ),
                 const SizedBox(height: 24),
                 TextField(
                   controller: _relay,
@@ -117,9 +127,10 @@ class _PairingPageState extends State<PairingPage> {
                   controller: _pin,
                   maxLength: 6,
                   decoration: const InputDecoration(
-                      labelText: 'PIN（电脑上显示的 6 位数字）',
-                      border: OutlineInputBorder(),
-                      counterText: ''),
+                    labelText: 'PIN（电脑上显示的 6 位数字）',
+                    border: OutlineInputBorder(),
+                    counterText: '',
+                  ),
                   keyboardType: TextInputType.number,
                   obscureText: true,
                 ),
@@ -131,8 +142,9 @@ class _PairingPageState extends State<PairingPage> {
                     setState(() => _fromQR = false);
                   },
                   decoration: const InputDecoration(
-                      labelText: '设备 ID（扫码后自动填入，也可手动输入）',
-                      border: OutlineInputBorder()),
+                    labelText: '设备 ID（扫码后自动填入，也可手动输入）',
+                    border: OutlineInputBorder(),
+                  ),
                   keyboardType: TextInputType.number,
                 ),
                 const SizedBox(height: 24),
@@ -151,8 +163,12 @@ class _PairingPageState extends State<PairingPage> {
                         onPressed: widget.state.busy ? null : _submit,
                         child: widget.state.busy
                             ? const SizedBox(
-                                height: 20, width: 20,
-                                child: CircularProgressIndicator(strokeWidth: 2))
+                                height: 20,
+                                width: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
                             : const Text('连接'),
                       ),
                     ),
@@ -161,8 +177,12 @@ class _PairingPageState extends State<PairingPage> {
                 if (widget.state.error != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 16),
-                    child: Text(widget.state.error!,
-                        style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                    child: Text(
+                      widget.state.error!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
                   ),
               ],
             ),

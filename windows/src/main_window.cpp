@@ -1578,9 +1578,36 @@ std::string DeviceID() {
 // (http for plaintext test relays, https otherwise) so the phone connects
 // with a matching protocol. `lanAddress` (e.g. "192.168.1.5:13080") lets the
 // phone prefer a direct LAN connection to this desktop's dsh web and only
-// fall back to the cloud relay when it can't reach it.
+// fall back to the cloud relay when it can't reach it. The dsh process token is
+// included so the phone can mint the browser cookie required by newer dsh releases.
+std::string QueryEncode(const std::string& value) {
+    static const char hex[] = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : value) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 15];
+        }
+    }
+    return out;
+}
+
+std::string DshTokenFromAuthUrl(const std::wstring& url) {
+    const auto pos = url.find(L"?token=");
+    if (pos == std::wstring::npos) return "";
+    auto token = url.substr(pos + 7);
+    const auto end = token.find_first_of(L"&#");
+    if (end != std::wstring::npos) token.resize(end);
+    return QueryEncode(WideToUtf8(token));
+}
+
 std::string PairingQRContent(const std::wstring& relayUrl, const std::string& deviceId,
-                             const std::string& lanAddress) {
+                             const std::string& lanAddress, unsigned short dshPort,
+                             const std::string& dshToken) {
     std::wstring scheme = L"https";
     std::wstring host = relayUrl;
     size_t sep = host.find(L"://");
@@ -1591,8 +1618,9 @@ std::string PairingQRContent(const std::wstring& relayUrl, const std::string& de
     size_t slash = host.find(L'/');
     if (slash != std::wstring::npos) host = host.substr(0, slash);
     std::string qr = "relay://" + WideToUtf8(host) + "/pair?device=" + deviceId +
-                     "&scheme=" + WideToUtf8(scheme);
+                     "&scheme=" + WideToUtf8(scheme) + "&dshPort=" + std::to_string(dshPort);
     if (!lanAddress.empty()) qr += "&lan=" + lanAddress;
+    if (!dshToken.empty()) qr += "&dshToken=" + dshToken;
     return qr;
 }
 
@@ -1741,7 +1769,9 @@ void MainWindow::OnMobileRemote() {
     deviceId_ = DeviceID();
     std::string lan = LocalLANAddress();
     if (!lan.empty()) lan += ":13080";
-    qrPNG_ = GenerateQRPNG(PairingQRContent(mobileRelayUrl_, deviceId_, lan));
+    qrPNG_ = GenerateQRPNG(PairingQRContent(mobileRelayUrl_, deviceId_, lan,
+                                             ServerManager::Port(),
+                                             DshTokenFromAuthUrl(ServerManager::AuthUrl())));
     if (qrPNG_.empty()) {
         bool zh = IsChinese();
         MessageBoxW(hwnd_, zh ? L"生成配对二维码失败。" : L"Failed to generate the pairing QR code.",

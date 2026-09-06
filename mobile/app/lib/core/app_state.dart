@@ -94,7 +94,13 @@ class AppState extends ChangeNotifier {
       try {
         final req = await client.getUrl(Uri.parse('http://$lan/'));
         final resp = await req.close().timeout(const Duration(seconds: 1));
-        return resp.statusCode == 200;
+        // Newer dsh deliberately answers unauthenticated root requests with
+        // 401 (or 403 before the proxy normalizes Host/Origin). Both prove
+        // that the LAN bridge is reachable; the WebProxy sends the dsh token
+        // and rewrites the request before the real page load.
+        return resp.statusCode == 200 ||
+            resp.statusCode == 401 ||
+            resp.statusCode == 403;
       } finally {
         client.close();
       }
@@ -119,6 +125,8 @@ class AppState extends ChangeNotifier {
     required String deviceId,
     required String pin,
     String? lan,
+    String? dshToken,
+    int dshPort = 3080,
   }) async {
     busy = true;
     error = null;
@@ -132,6 +140,8 @@ class AppState extends ChangeNotifier {
         refreshToken: json['refreshToken'] as String? ?? '',
         pairedAt: DateTime.now().millisecondsSinceEpoch,
         lan: lan,
+        dshToken: dshToken,
+        dshPort: dshPort,
       );
       connections = [
         conn,
@@ -169,6 +179,8 @@ class AppState extends ChangeNotifier {
         refreshToken: json['refreshToken'] as String? ?? '',
         pairedAt: DateTime.now().millisecondsSinceEpoch,
         lan: conn.lan,
+        dshToken: conn.dshToken,
+        dshPort: conn.dshPort,
       );
       connections = [
         updated,
@@ -305,6 +317,8 @@ class SavedConnection {
     required this.refreshToken,
     required this.pairedAt,
     this.lan,
+    this.dshToken,
+    this.dshPort = 3080,
   });
 
   final String relay;
@@ -317,6 +331,13 @@ class SavedConnection {
   /// the phone tries a direct connection first and falls back to the relay.
   final String? lan;
 
+  /// dsh's process token from the pairing QR. It is exchanged for a browser
+  /// cookie by the first WebView request; it is not the relay session token.
+  final String? dshToken;
+
+  /// Actual dsh port for hosts whose desktop selected a non-default port.
+  final int dshPort;
+
   Map<String, dynamic> toJson() => {
     'relay': relay,
     'hostId': hostId,
@@ -324,6 +345,8 @@ class SavedConnection {
     'refreshToken': refreshToken,
     'pairedAt': pairedAt,
     if (lan != null) 'lan': lan,
+    if (dshToken != null && dshToken!.isNotEmpty) 'dshToken': dshToken,
+    'dshPort': dshPort,
   };
 
   factory SavedConnection.fromJson(Map<String, dynamic> json) =>
@@ -334,5 +357,7 @@ class SavedConnection {
         refreshToken: json['refreshToken'] as String? ?? '',
         pairedAt: (json['pairedAt'] as num?)?.toInt() ?? 0,
         lan: json['lan'] as String?,
+        dshToken: json['dshToken'] as String?,
+        dshPort: (json['dshPort'] as num?)?.toInt() ?? 3080,
       );
 }
