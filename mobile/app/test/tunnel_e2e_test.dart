@@ -118,6 +118,8 @@ void main() {
           _pin,
           '--e2e-secret',
           _e2eSecret,
+          '--dsh-token',
+          dsh.launchToken,
           '--lan-port',
           '$lanPort',
         ],
@@ -159,10 +161,12 @@ void main() {
       final browser = await _Browser.connect(proxy.port);
       addTearDown(browser.destroy);
 
-      // 5a. Launch-token exchange: 303 + Set-Cookie, redirect followed on the
-      // SAME connection (keep-alive reuse, like Chromium).
-      final mint = await browser.get('/?token=${dsh.launchToken}');
-      expect(mint.status, 303, reason: 'token exchange must mint a cookie');
+      // 5a. The app never sees the launch token: the browser requests plain
+      // `/` and the BRIDGE injects the token into the first request — the
+      // 303 + Set-Cookie proves the injection end-to-end. Redirect followed
+      // on the SAME connection (keep-alive reuse, like Chromium).
+      final mint = await browser.get('/');
+      expect(mint.status, 303, reason: 'injected token must mint a cookie');
       expect(mint.cookie, isNotNull);
 
       final index = await browser.get('/');

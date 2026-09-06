@@ -21,7 +21,6 @@ class _PairingPageState extends State<PairingPage> {
   bool _fromQR = false; // relay address came from the QR code
   String _deviceId = '';
   String? _lan; // optional "ip:port" for direct LAN connect (from the QR)
-  String? _dshToken; // dsh process token used to mint the browser cookie
   String? _e2eSecret; // tunnel E2E secret (shared via QR, relay-blind)
   int _dshPort = 3080;
 
@@ -41,7 +40,6 @@ class _PairingPageState extends State<PairingPage> {
         deviceId: _deviceId,
         pin: pin,
         lan: _lan,
-        dshToken: _dshToken,
         e2eSecret: _e2eSecret,
         dshPort: _dshPort,
       );
@@ -80,7 +78,6 @@ class _PairingPageState extends State<PairingPage> {
       _fromQR = true;
       _scanning = false;
       _lan = uri.queryParameters['lan'];
-      _dshToken = uri.queryParameters['dshToken'];
       _e2eSecret = uri.queryParameters['e2e'];
       _dshPort = int.tryParse(uri.queryParameters['dshPort'] ?? '') ?? 3080;
       _relay.text = '$scheme://${uri.authority}';

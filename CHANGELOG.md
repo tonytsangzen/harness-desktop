@@ -9,6 +9,7 @@
 - **压缩**：payload ≥ 64B 先 deflate-raw（命中才采用）
 - **聚合**：小 TCP 读写按 ~4ms 窗口合并；多流记录再按 ~3ms 聚合为 `stream-batch` 帧（relay 逐项路由，单帧最多 128 项）——页面加载的数十个小帧合并为大帧，显著降低 WSS 消息数与中继转发开销
 - **实现**：bridge（Node crypto/zlib）、App（`cryptography` 包 + dart:io zlib，含 Node↔Dart 黄金向量互操作单测）、relay `stream-batch` 路由；三端桌面壳生成/持久化 `e2eSecret` 并写入二维码；协议文档 §3/§4 同步。**部署注意：聚合需配套升级 relay**（`stream-batch` 新帧）
+- **dsh token 不再走二维码/App**：dsh 每次重启都轮换启动 token，二维码/手机端存储的 token 注定过期。改为桌面壳把当前 token 传给 bridge（`--dsh-token`，并持久化最近值以覆盖「复用已运行 dsh」场景），bridge 对每条流的第一个 `GET /` 自动注入 `?token=` 完成 cookie 换取——二维码与 App 完全不感知 token，dsh 重启后凭持久化 cookie 自动恢复
 
 ### 修复（手机端首次连接任务列表不刷新 / dsh 鉴权）
 

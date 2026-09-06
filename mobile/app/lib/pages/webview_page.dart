@@ -57,16 +57,10 @@ class _WebviewPageState extends State<WebviewPage> {
   }
 
   Uri _appUrl(int proxyPort) {
-    final token = widget.state.currentConnection?.dshToken;
-    return Uri(
-      scheme: 'http',
-      host: '127.0.0.1',
-      port: proxyPort,
-      path: '/',
-      queryParameters: token == null || token.isEmpty
-          ? null
-          : {'token': token},
-    );
+    // No launch token here: the bridge injects it into the first `GET /` of
+    // each stream (it rotates on every dsh restart, so the app must not
+    // store it); dsh answers with the session cookie the WebView keeps.
+    return Uri(scheme: 'http', host: '127.0.0.1', port: proxyPort, path: '/');
   }
 
   /// The tunnel re-attached after a drop — AppState usually swapped in a

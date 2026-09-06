@@ -125,7 +125,6 @@ class AppState extends ChangeNotifier {
     required String deviceId,
     required String pin,
     String? lan,
-    String? dshToken,
     String? e2eSecret,
     int dshPort = 3080,
   }) async {
@@ -141,7 +140,6 @@ class AppState extends ChangeNotifier {
         refreshToken: json['refreshToken'] as String? ?? '',
         pairedAt: DateTime.now().millisecondsSinceEpoch,
         lan: lan,
-        dshToken: dshToken,
         e2eSecret: e2eSecret,
         dshPort: dshPort,
       );
@@ -181,7 +179,6 @@ class AppState extends ChangeNotifier {
         refreshToken: json['refreshToken'] as String? ?? '',
         pairedAt: DateTime.now().millisecondsSinceEpoch,
         lan: conn.lan,
-        dshToken: conn.dshToken,
         e2eSecret: conn.e2eSecret,
         dshPort: conn.dshPort,
       );
@@ -325,7 +322,6 @@ class SavedConnection {
     required this.refreshToken,
     required this.pairedAt,
     this.lan,
-    this.dshToken,
     this.e2eSecret,
     this.dshPort = 3080,
   });
@@ -339,10 +335,6 @@ class SavedConnection {
   /// Optional "ip:port" of the desktop's dsh web on the LAN (from the QR) —
   /// the phone tries a direct connection first and falls back to the relay.
   final String? lan;
-
-  /// dsh's process token from the pairing QR. It is exchanged for a browser
-  /// cookie by the first WebView request; it is not the relay session token.
-  final String? dshToken;
 
   /// End-to-end tunnel secret from the pairing QR (`e2e=`); shared with the
   /// desktop bridge out-of-band so the relay cannot read stream payloads.
@@ -358,7 +350,6 @@ class SavedConnection {
     'refreshToken': refreshToken,
     'pairedAt': pairedAt,
     if (lan != null) 'lan': lan,
-    if (dshToken != null && dshToken!.isNotEmpty) 'dshToken': dshToken,
     if (e2eSecret != null && e2eSecret!.isNotEmpty) 'e2eSecret': e2eSecret,
     'dshPort': dshPort,
   };
@@ -371,7 +362,6 @@ class SavedConnection {
         refreshToken: json['refreshToken'] as String? ?? '',
         pairedAt: (json['pairedAt'] as num?)?.toInt() ?? 0,
         lan: json['lan'] as String?,
-        dshToken: json['dshToken'] as String?,
         e2eSecret: json['e2eSecret'] as String?,
         dshPort: (json['dshPort'] as num?)?.toInt() ?? 3080,
       );

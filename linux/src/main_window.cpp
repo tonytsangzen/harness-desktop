@@ -1325,9 +1325,22 @@ std::string E2ESecret() {
     return secret;
 }
 
+// The dsh launch token: refreshed whenever the shell sees a tokened URL from
+// a dsh it spawned, persisted so a bridge spawned against a REUSED dsh
+// instance still has the last known value. The bridge injects it into the
+// first `GET /` of each stream; the QR/app never carry it.
+std::string DshTokenForBridge(const std::string& current) {
+    const std::string path = ConfigDir() + "/dshtoken";
+    if (!current.empty()) {
+        WriteFileText(path, current);
+        return current;
+    }
+    return ReadFileText(path);
+}
+
 std::string PairingQRContent(const std::string& relayUrl, const std::string& deviceId,
                              const std::string& lanAddress, unsigned short dshPort,
-                             const std::string& dshToken, const std::string& e2eSecret) {
+                             const std::string& e2eSecret) {
     std::string scheme = "https";
     std::string host = relayUrl;
     size_t sep = host.find("://");
@@ -1340,7 +1353,6 @@ std::string PairingQRContent(const std::string& relayUrl, const std::string& dev
     std::string qr = "relay://" + host + "/pair?device=" + deviceId +
                      "&scheme=" + scheme + "&dshPort=" + std::to_string(dshPort);
     if (!lanAddress.empty()) qr += "&lan=" + lanAddress;
-    if (!dshToken.empty()) qr += "&dshToken=" + QueryEncode(dshToken);
     if (!e2eSecret.empty()) qr += "&e2e=" + QueryEncode(e2eSecret);
     return qr;
 }
@@ -1439,15 +1451,8 @@ void MainWindow::OnMobileRemoteActivate(GtkWidget* /*item*/, gpointer userData) 
     std::string deviceId = DeviceID();
     std::string lan = LocalLANAddress();
     if (!lan.empty()) lan += ":13080";
-    std::string dshToken;
-    const auto tokenPos = self->authUrl_.find("?token=");
-    if (tokenPos != std::string::npos) {
-        dshToken = self->authUrl_.substr(tokenPos + 7);
-        const auto end = dshToken.find_first_of("&#");
-        if (end != std::string::npos) dshToken.resize(end);
-    }
     std::string qrContent = PairingQRContent(self->mobileRelayUrl_, deviceId, lan,
-                                              ServerManager::ActivePort(), dshToken,
+                                              ServerManager::ActivePort(),
                                               E2ESecret());
     std::string qrPNG = GenerateQRPNG(qrContent);
     if (qrPNG.empty()) {
@@ -1499,11 +1504,20 @@ void MainWindow::StartMobileBridge(const std::string& relay, const std::string& 
     // existing hostId (hijack protection).
     std::string hostToken = ReadFileText(ConfigDir() + "/hosttoken");
     const std::string e2eSecret = E2ESecret();
+    std::string dshToken;
+    const auto tokenPos = self->authUrl_.find("?token=");
+    if (tokenPos != std::string::npos) {
+        dshToken = self->authUrl_.substr(tokenPos + 7);
+        const auto end = dshToken.find_first_of("&#");
+        if (end != std::string::npos) dshToken.resize(end);
+    }
+    dshToken = DshTokenForBridge(dshToken);
     std::vector<const char*> argStorage = {
         node.c_str(), bridge.c_str(), "--relay", relay.c_str(),
         "--dsh-port", portStr.c_str(), "--device-id", deviceId.c_str(),
         "--pin", pin.c_str(),
         "--e2e-secret", e2eSecret.c_str(),
+        "--dsh-token", dshToken.c_str(),
     };
     if (!hostToken.empty()) {
         argStorage.push_back("--host-token");

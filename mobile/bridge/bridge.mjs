@@ -29,6 +29,7 @@ const args = parseArgs({ options: {
   "host-token": { type: "string", default: "" },
   "lan-port": { type: "string", default: "13080" },
   "e2e-secret": { type: "string", default: "" },
+  "dsh-token": { type: "string", default: "" },
 } });
 
 const relay = (() => {
@@ -99,6 +100,27 @@ function open(key, dir, record) {
   return { flags, body };
 }
 
+// --- dsh launch-token injection ---------------------------------------------
+// dsh answers unauthenticated `GET /` with 401 and only mints the browser
+// session cookie on the tokened URL. The token rotates on every dsh restart,
+// so instead of shipping it through the QR the bridge injects it into the
+// first request of each stream (before any cookie exists, dsh answers with
+// 303 + Set-Cookie; with a valid cookie the extra token is harmless). The
+// shell passes the current token via --dsh-token.
+const dshToken = args.values["dsh-token"];
+
+function injectLaunchToken(plain) {
+  const lineEnd = plain.indexOf("\r\n");
+  if (lineEnd < 0) return plain;
+  const line = plain.subarray(0, lineEnd).toString("latin1");
+  if (!line.startsWith("GET ") || !line.includes(" HTTP/") || line.includes("token=")) {
+    return plain;
+  }
+  const insert = line.includes("?") ? "&token=" : "?token=";
+  const rewritten = line.replace(" HTTP/", `${insert}${dshToken} HTTP/`);
+  return Buffer.concat([Buffer.from(rewritten, "latin1"), plain.subarray(lineEnd)]);
+}
+
 // --- Per-stream coalescing + cross-stream aggregation -----------------------
 const FLUSH_MS = 4;          // coalesce window per stream
 const BATCH_MS = 3;          // aggregation window across streams
@@ -139,6 +161,7 @@ function makeStream(id, socket) {
     txSeq: 0,
     rxSeq: 0,
     mode: "pending", // pending -> enc (we have a secret) | plain (legacy peer)
+    firstPayload: true,
     pending: [],
     pendingBytes: 0,
     timer: null,
@@ -234,8 +257,13 @@ function closeStream(id, reason = "closed") {
 function handleInboundPayload(streamId, payload) {
   const state = streams.get(streamId);
   if (!state) return;
-  const plain = e2eInbound(state, payload);
-  if (plain && plain.length) state.socket.write(plain);
+  let plain = e2eInbound(state, payload);
+  if (!plain || !plain.length) return;
+  if (state.firstPayload && dshToken) {
+    plain = injectLaunchToken(plain);
+  }
+  state.firstPayload = false;
+  state.socket.write(plain);
 }
 
 function handleStreamOpen(frame) {
@@ -312,10 +340,36 @@ function connect() {
 const lanPort = Number(args.values["lan-port"]) || 13080;
 createServer((socket) => {
   const upstream = createConnection({ host: dshHost, port: dshPort });
-  socket.pipe(upstream);
-  upstream.pipe(socket);
+  let first = dshToken ? Buffer.alloc(0) : null; // null = injection N/A
+  socket.on("data", (data) => {
+    if (first === null) {
+      upstream.write(data);
+      return;
+    }
+    first = Buffer.concat([first, data]);
+    const lineEnd = first.indexOf("\r\n");
+    if (lineEnd < 0) {
+      if (first.length > 16 * 1024) {
+        upstream.write(first);
+        first = null;
+      }
+      return;
+    }
+    const line = first.subarray(0, lineEnd).toString("latin1");
+    if (line.startsWith("GET ") && line.includes(" HTTP/") && !line.includes("token=")) {
+      const insert = line.includes("?") ? "&token=" : "?token=";
+      const rewritten = line.replace(" HTTP/", `${insert}${dshToken} HTTP/`);
+      upstream.write(Buffer.concat([Buffer.from(rewritten, "latin1"), first.subarray(lineEnd)]));
+    } else {
+      upstream.write(first);
+    }
+    first = null;
+  });
+  upstream.on("data", (data) => socket.write(data));
   socket.on("error", () => upstream.destroy());
   upstream.on("error", () => socket.destroy());
+  upstream.on("end", () => socket.end());
+  socket.on("end", () => upstream.end());
 }).listen(lanPort, "0.0.0.0", () => emit("lan-ready", { port: lanPort }))
   .on("error", (error) => emit("lan-port-error", { port: lanPort, error: String(error.code || error) }));
 

@@ -707,7 +707,12 @@ final class MobileRemoteManager {
         self.dshPort = dshPort
     }
 
-    func start() {
+    /// The dsh launch token to hand the bridge (nil = fall back to the last
+    /// persisted value; see `LastDshToken`).
+    var dshToken: String?
+
+    func start(dshToken: String?) {
+        self.dshToken = dshToken
         NSLog("DSH bridge start: node=%@ bridge=%@ running=%d", nodePath, bridgePath.path, isRunning ? 1 : 0)
         guard !isRunning else { return }
         restartDelay = 2.0
@@ -727,7 +732,8 @@ final class MobileRemoteManager {
         p.executableURL = URL(fileURLWithPath: nodePath)
         var args = [bridgePath.path, "--relay", relayURL, "--dsh-port", "\(dshPort)",
                     "--device-id", deviceID, "--pin", StablePairingPin(),
-                    "--e2e-secret", E2ESecret()]
+                    "--e2e-secret", E2ESecret(),
+                    "--dsh-token", LastDshToken(current: dshToken)]
         // Persisted hostToken lets a bridge restart reconnect by token instead
         // of re-registering — the relay refuses anonymous re-registration of an
         // existing hostId (hijack protection). Only reuse the token when it was
@@ -789,7 +795,7 @@ final class MobileRemoteManager {
         restartWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self = self, self.autoRestart, !self.stopping else { return }
-            self.start()
+            self.start(dshToken: self.dshToken)
         }
         restartWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + restartDelay, execute: work)
@@ -881,6 +887,19 @@ func isWeakPin(_ pin: String) -> Bool {
     return ["123123", "112233", "121212", "111222", "000001", "123321"].contains(pin)
 }
 
+/// The dsh launch token: updated whenever the shell sees a tokened URL from
+/// a dsh it spawned, persisted so a bridge spawned against a REUSED dsh
+/// instance (whose stdout the shell never sees) still has the last known
+/// value. The bridge injects it into the first `GET /` of each stream; the
+/// QR/app never carry it (it rotates on every dsh restart).
+func LastDshToken(current: String?) -> String {
+    if let current, !current.isEmpty {
+        UserDefaults.standard.set(current, forKey: "mobileDshToken")
+        return current
+    }
+    return UserDefaults.standard.string(forKey: "mobileDshToken") ?? ""
+}
+
 /// Stable end-to-end tunnel secret: random 32 bytes generated on first
 /// launch, then persisted. Handed to the bridge (`--e2e-secret`) and carried
 /// in the pairing QR (`e2e=`), so the app and the bridge derive a shared key
@@ -946,8 +965,7 @@ private func queryEncode(_ value: String) -> String {
 }
 
 func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?,
-                      dshPort: UInt16, dshToken: String?,
-                      e2eSecret: String?) -> String {
+                      dshPort: UInt16, e2eSecret: String?) -> String {
     var host = relayURL
     var scheme = "https"
     if let url = URL(string: relayURL) {
@@ -957,7 +975,6 @@ func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?,
     }
     var qr = "relay://\(host)/pair?device=\(deviceID)&scheme=\(scheme)&dshPort=\(dshPort)"
     if let lan = lanAddress { qr += "&lan=\(lan)" }
-    if let token = dshToken, !token.isEmpty { qr += "&dshToken=\(queryEncode(token))" }
     if !e2eSecret!.isEmpty { qr += "&e2e=\(queryEncode(e2eSecret!))" }
     return qr
 }
@@ -2527,12 +2544,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         // can prefer a direct connection and fall back to the relay).
         let deviceID = DeviceID()
         let lan = LocalLANAddress().map { "\($0):13080" }
-        let dshToken = server.authURL.flatMap { authURL in
-            URLComponents(url: authURL, resolvingAgainstBaseURL: false)?.queryItems?
-                .first(where: { $0.name == "token" })?.value
-        }
         let qrContent = PairingQRContent(relayURL: relay, deviceID: deviceID, lanAddress: lan,
-                                         dshPort: server.activePort, dshToken: dshToken,
+                                         dshPort: server.activePort,
                                          e2eSecret: E2ESecret())
         guard let qrPNG = GenerateQRPNG(content: qrContent) else {
             setRemoteStatus(s.mobileRemoteFailed, color: .systemRed)
@@ -2583,7 +2596,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
                 self?.startRemotePolling(hostToken: pairing.hostToken)
             }
         }
-        m.start()
+        let token = server.authURL.flatMap { url in
+            URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first(where: { $0.name == "token" })?.value
+        }
+        m.start(dshToken: token)
     }
 
     private func stopMobileBridge() {

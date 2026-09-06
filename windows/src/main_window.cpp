@@ -1587,6 +1587,40 @@ std::string E2ESecret() {
     return secret;
 }
 
+// The dsh launch token: refreshed whenever the shell sees a tokened URL from
+// a dsh it spawned, persisted so a bridge spawned against a REUSED dsh
+// instance (whose stdout the shell never sees) still has the last known
+// value. The bridge injects it into the first `GET /` of each stream; the
+// QR/app never carry it (it rotates on every dsh restart).
+std::string DshTokenForBridge(const std::string& current) {
+    if (!current.empty()) {
+        HKEY key = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\DSHWebView", 0,
+                            nullptr, REG_OPTION_NON_VOLATILE, KEY_WRITE,
+                            nullptr, &key, nullptr) == ERROR_SUCCESS) {
+            const std::wstring wide = Utf8ToWide(current);
+            RegSetValueExW(key, L"DshToken", 0, REG_SZ,
+                           reinterpret_cast<const BYTE*>(wide.c_str()),
+                           static_cast<DWORD>((wide.size() + 1) * sizeof(wchar_t)));
+            RegCloseKey(key);
+        }
+        return current;
+    }
+    HKEY key = nullptr;
+    wchar_t buf[256] = {};
+    DWORD size = sizeof(buf);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\DSHWebView", 0, KEY_READ,
+                      &key) == ERROR_SUCCESS) {
+        const bool ok = RegQueryValueExW(key, L"DshToken", nullptr, nullptr,
+                                         reinterpret_cast<LPBYTE>(buf),
+                                         &size) == ERROR_SUCCESS &&
+                        buf[0] != L'\0';
+        RegCloseKey(key);
+        if (ok) return WideToUtf8(buf);
+    }
+    return "";
+}
+
 // 13-digit random device ID derived from device info (hostname + MachineGuid),
 // stable across launches so reconnects reuse the same host identity.
 std::string DeviceID() {
@@ -1656,7 +1690,7 @@ std::string DshTokenFromAuthUrl(const std::wstring& url) {
 
 std::string PairingQRContent(const std::wstring& relayUrl, const std::string& deviceId,
                              const std::string& lanAddress, unsigned short dshPort,
-                             const std::string& dshToken, const std::string& e2eSecret) {
+                             const std::string& e2eSecret) {
     std::wstring scheme = L"https";
     std::wstring host = relayUrl;
     size_t sep = host.find(L"://");
@@ -1669,7 +1703,6 @@ std::string PairingQRContent(const std::wstring& relayUrl, const std::string& de
     std::string qr = "relay://" + WideToUtf8(host) + "/pair?device=" + deviceId +
                      "&scheme=" + WideToUtf8(scheme) + "&dshPort=" + std::to_string(dshPort);
     if (!lanAddress.empty()) qr += "&lan=" + lanAddress;
-    if (!dshToken.empty()) qr += "&dshToken=" + dshToken;
     if (!e2eSecret.empty()) qr += "&e2e=" + QueryEncode(e2eSecret);
     return qr;
 }
@@ -1821,7 +1854,6 @@ void MainWindow::OnMobileRemote() {
     if (!lan.empty()) lan += ":13080";
     qrPNG_ = GenerateQRPNG(PairingQRContent(mobileRelayUrl_, deviceId_, lan,
                                              ServerManager::Port(),
-                                             DshTokenFromAuthUrl(ServerManager::AuthUrl()),
                                              E2ESecret()));
     if (qrPNG_.empty()) {
         bool zh = IsChinese();
@@ -1872,7 +1904,10 @@ void MainWindow::StartBridge(const std::wstring& relay, const std::string& devic
                        L" --dsh-port " + std::to_wstring(ServerManager::Port()) +
                        L" --device-id " + Utf8ToWide(deviceId) +
                        L" --pin " + StablePairingPin() +
-                       L" --e2e-secret " + Utf8ToWide(E2ESecret());
+                       L" --e2e-secret " + Utf8ToWide(E2ESecret()) +
+                       L" --dsh-token " +
+                       Utf8ToWide(DshTokenForBridge(
+                           DshTokenFromAuthUrl(ServerManager::AuthUrl())));
     // Persisted hostToken: reconnect by token (anonymous re-registration of a
     // known hostId is refused by the relay).
     if (std::wstring tok; RegGetHostToken(tok)) {
