@@ -30,6 +30,7 @@ class WebviewPage extends StatefulWidget {
 
 class _WebviewPageState extends State<WebviewPage> {
   WebProxy? _proxy;
+  PortBackend? _proxyBackend; // the backend the running proxy dials through
   WebViewController? _controller;
   String? _error;
   bool _lanMode = false; // currently loading the desktop directly on the LAN
@@ -49,11 +50,54 @@ class _WebviewPageState extends State<WebviewPage> {
     // The relay tunnel just came back: reload so the page recovers from the
     // requests that failed while it was down.
     if (online && !_wasOnline && !_lanMode && _controller != null) {
-      print('[dsh] tunnel restored, reloading webview');
-      _controller!.reload();
+      _onTunnelRestored();
     }
     _wasOnline = online;
     if (mounted) setState(() {});
+  }
+
+  Uri _appUrl(int proxyPort) {
+    final token = widget.state.currentConnection?.dshToken;
+    return Uri(
+      scheme: 'http',
+      host: '127.0.0.1',
+      port: proxyPort,
+      path: '/',
+      queryParameters: token == null || token.isEmpty
+          ? null
+          : {'token': token},
+    );
+  }
+
+  /// The tunnel re-attached after a drop — AppState usually swapped in a
+  /// fresh RelayClient, while the running proxy still dials through the dead
+  /// one, so every WebView request would fail silently and the page would
+  /// freeze on stale content. Rebuild the proxy against the live client and
+  /// reload; a same-client restore only needs the reload.
+  void _onTunnelRestored() {
+    final client = widget.state.client;
+    if (client == null || identical(_proxyBackend, client)) {
+      print('[dsh] tunnel restored, reloading webview');
+      _controller?.reload();
+      return;
+    }
+    print('[dsh] tunnel restored with a new client, rebuilding proxy');
+    final proxy = WebProxy(
+      client,
+      remotePort: widget.state.currentConnection?.dshPort ?? 3080,
+    );
+    _proxyBackend = client;
+    _proxy?.close();
+    _proxy = proxy;
+    proxy
+        .start()
+        .then((_) {
+          if (!mounted) return;
+          _controller?.loadRequest(_appUrl(proxy.port));
+        })
+        .catchError((Object e) {
+          if (mounted) setState(() => _error = '启动本地代理失败: $e');
+        });
   }
 
   Future<void> _bootstrap() async {
@@ -89,6 +133,7 @@ class _WebviewPageState extends State<WebviewPage> {
     final connection = widget.state.currentConnection;
     final proxy = WebProxy(backend, remotePort: connection?.dshPort ?? 3080);
     _proxy = proxy;
+    _proxyBackend = backend;
     proxy
         .start()
         .then((_) {
@@ -96,18 +141,7 @@ class _WebviewPageState extends State<WebviewPage> {
           final controller = _buildController();
           _controller = controller;
           setState(() {});
-          final token = connection?.dshToken;
-          controller.loadRequest(
-            Uri(
-              scheme: 'http',
-              host: '127.0.0.1',
-              port: proxy.port,
-              path: '/',
-              queryParameters: token == null || token.isEmpty
-                  ? null
-                  : {'token': token},
-            ),
-          );
+          controller.loadRequest(_appUrl(proxy.port));
         })
         .catchError((Object e) {
           if (mounted) setState(() => _error = '启动本地代理失败: $e');

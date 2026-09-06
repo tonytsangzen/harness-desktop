@@ -132,20 +132,13 @@ relay 每 30 秒向两端发送文本 `{"v":1,"type":"ping"}`，两端回复 `po
 
 ## 4. 本地代理行为
 
-Flutter `WebProxy` 绑定 `127.0.0.1` 的本地临时端口。每个 accepted TCP socket 建立一个 `PortBackend.connectPort(3080)`，并在两侧持续复制字节直到任一侧关闭。
+Flutter `WebProxy` 绑定 `127.0.0.1` 的本地端口。每个 accepted TCP socket 建立一个 `PortBackend.connectPort(3080)`，并在两侧持续复制字节直到任一侧关闭。
 
-为了让 dsh 接受来自本地代理的请求，代理只对首个 HTTP 请求头做两项兼容处理：
+绑定端口优先使用远端 dsh 端口（默认 `3080`，被占用时依次回退 `38080`、临时端口）。这样 WebView 的 origin 与桌面端 dsh 完全一致（`http://127.0.0.1:3080/`）。
 
-1. 将 `Host` 改为 `127.0.0.1:3080`；
-2. 删除 `Origin`。
+代理**不做任何 HTTP 头改写**，请求 body、HTTP 响应、WebSocket upgrade 和所有字节均透明复制。历史上代理曾把首个请求的 `Host` 改写为 `127.0.0.1:3080` 并删除 `Origin`，但 HTTP keep-alive 复用连接上的后续请求无法逐一改写；而 dsh 的浏览器会话 cookie 与请求的 Host authority 绑定（cookie 名与签名 payload 均含 `sha256(Host)`），每次请求都会重新校验——authority 不一致的请求会得到 `401 dsh web authentication required`，这正是远程端报错的根源。origin 一致后，每个请求的 `Host`/`Origin`/cookie authority 天然一致，且满足 dsh 的 loopback + same-origin 请求围栏。代理不缓存、压缩解码、ETag 重验证或注入 HTML。
 
-请求 body、HTTP 响应、WebSocket upgrade、WebSocket 帧和所有后续字节均透明复制。代理不缓存、压缩解码、ETag 重验证或注入 HTML。
-
-新版 dsh 的根页面需要先用启动时生成的 `token` 换取浏览器 cookie。桌面端把
-`dshToken` 和实际 `dshPort` 放入配对二维码；App 配对后首次加载本地代理的
-`/?token=<dshToken>`，dsh 返回的 `303`、`Set-Cookie` 和后续重定向仍按 HTTP/TCP
-原样通过代理。该 token 只属于 dsh，不是 relay 的 `sessionToken`；relay 不读取或
-验证它。
+新版 dsh 的根页面需要先用启动时生成的 `token` 换取浏览器 cookie。桌面端把 `dshToken` 和实际 `dshPort` 放入配对二维码；App 配对后首次加载本地代理的 `/?token=<dshToken>`，dsh 返回的 `303`、`Set-Cookie` 和后续重定向按 HTTP/TCP 原样通过代理。该 token 只属于 dsh（进程级，`dsh web` 每次重启都会轮换），不是 relay 的 `sessionToken`；relay 不读取或验证它。dsh 的 cookie 签名密钥持久化在 dsh profile 中，因此固定端口 + 有效 cookie 时，dsh 重启后手机无需重新配对即可恢复。
 
 LAN 模式由 bridge 暴露 `0.0.0.0:13080`，是同一个 dsh TCP 端口的透明 TCP 转发；App 仍通过本地 `WebProxy` 访问它，因此 LAN 和 relay 的 WebView 行为一致。
 
