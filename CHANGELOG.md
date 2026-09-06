@@ -1,4 +1,4 @@
-## [1.2.1] - 2026-09-06
+## [1.2.2] - 2026-09-07
 
 ### 新增（手机 ↔ 桌面隧道端到端加密、压缩、聚合）
 
@@ -16,11 +16,12 @@
 dsh 的浏览器会话 cookie 与请求的 Host authority 逐请求绑定（cookie 名与签名 payload 均含 `sha256(Host)`），而手机端本地代理此前只改写每条 TCP 连接**第一条请求**的 Host——HTTP keep-alive 复用连接上的后续请求（含 303 换 cookie 的重定向）带着代理自身端口到达 dsh，cookie 校验必然失败，WebView 直接显示 `401 dsh web authentication required`。桌面端本地直连 authority 恒定，因此从未复现。
 
 - **代理 origin 与桌面 dsh 对齐**：本地代理优先绑定 loopback 的 dsh 同款端口（默认 3080，被占依次回退 38080、临时端口），并彻底移除 Host/Origin 改写——origin 一致后每个请求的 Host/Origin/cookie authority 天然一致，同时满足 dsh 的 loopback + same-origin 请求围栏；固定端口还让会话 cookie 跨连接、跨 LAN/隧道切换、乃至跨 dsh 重启持续有效（dsh 的 cookie 签名密钥持久化在 profile 中）
-- **dsh 鉴权 token 经配对二维码下发**：三端把 dsh 启动时颁发的进程 token（`/?token=…`）与实际 dsh 端口写入配对二维码，手机配对后首次加载 `/?token=<dshToken>` 换取会话 cookie；dsh token 属进程级（重启轮换），cookie 有效时手机无需重新配对即可自愈
 - **老 WebView polyfill 注入恢复**：华为等设备的系统 WebView 停在 Chromium 114，dsh 前端调用的 `Promise.withResolvers`（119+）与 `AbortSignal.any`（116+）不存在，前端 JS 崩溃导致任务列表/控制流起不来（`dsh web authentication required` 之外的另一层故障）。代理恢复注入能力：每个请求改写 `Accept-Encoding: identity`，对未压缩 `text/html` 响应在 `<head>` 开标签后插入 polyfill（重构透明流时丢失，此次以流式分帧感知的方式重新实现：Content-Length 与 chunked 均支持，注入只发生在分块边界，帧完整性有测试覆盖），并强制 `Cache-Control: no-store`
 - **隧道重连后代理跟进**：隧道闪断重连会换新的 RelayClient，而页面加载时的代理仍拨号旧的死连接——恢复后页面所有请求静默失败、任务列表永不刷新。现在隧道恢复时检测 client 更换并重建代理再重载
 - **协议文档同步**（`docs/mobile-relay-protocol.md` §4）：代理行为改为「绑定 dsh 同款端口 + 零改写透明转发」，并记录 Host authority 绑定 cookie 的背景
 - **测试**：新增全链路 e2e（假 dsh 的 token→cookie 鉴权 + SSE 实时流 + 真实 relay/bridge + 手机端代理，无工具链时自动跳过）与 11 个代理行为用例（请求改写、两种分帧注入、JS bundle/gzip/非 200 不碰、keep-alive、WebSocket 透传、端口绑定回退）
+
+## [1.2.1] - 2026-09-06
 
 ### 修复（第二次启动报「中继服务器不可用」）
 
