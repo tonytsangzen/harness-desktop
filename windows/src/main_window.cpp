@@ -1510,6 +1510,34 @@ std::wstring StablePairingPin() {
     return npin;
 }
 
+// Host token persistence: lets a bridge restart reconnect by token instead of
+// re-registering — the relay refuses anonymous re-registration of a known
+// hostId (hijack protection).
+static bool RegGetHostToken(std::wstring& out) {
+    HKEY key = nullptr;
+    wchar_t tok[256] = {};
+    DWORD size = sizeof(tok);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\DSHWebView", 0, KEY_READ, &key) !=
+        ERROR_SUCCESS) return false;
+    bool ok = RegQueryValueExW(key, L"HostToken", nullptr, nullptr,
+                               reinterpret_cast<LPBYTE>(tok), &size) == ERROR_SUCCESS &&
+              tok[0] != L'\0';
+    RegCloseKey(key);
+    if (ok) out = tok;
+    return ok;
+}
+
+static void RegSaveHostToken(const std::wstring& token) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\DSHWebView", 0, nullptr,
+                        REG_OPTION_NON_VOLATILE, KEY_WRITE, nullptr, &key,
+                        nullptr) != ERROR_SUCCESS) return;
+    RegSetValueExW(key, L"HostToken", 0, REG_SZ,
+                   reinterpret_cast<const BYTE*>(token.c_str()),
+                   static_cast<DWORD>((token.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+}
+
 // 13-digit random device ID derived from device info (hostname + MachineGuid),
 // stable across launches so reconnects reuse the same host identity.
 std::string DeviceID() {
@@ -1763,6 +1791,11 @@ void MainWindow::StartBridge(const std::wstring& relay, const std::string& devic
                        L" --dsh-port " + std::to_wstring(ServerManager::Port()) +
                        L" --device-id " + Utf8ToWide(deviceId) +
                        L" --pin " + StablePairingPin();
+    // Persisted hostToken: reconnect by token (anonymous re-registration of a
+    // known hostId is refused by the relay).
+    if (std::wstring tok; RegGetHostToken(tok)) {
+        cmd += L" --host-token " + tok;
+    }
     // dsh's tokened web URL (parsed from its stdout); lets the bridge log in
     // to token-authenticated dsh builds.
     if (!ServerManager::AuthUrl().empty()) {
@@ -1838,7 +1871,20 @@ void MainWindow::OnBridgeLine(const std::wstring* line) {
         }
         std::string pin;
         JsonGetString(utf8, "pin", pin);
+        std::string hostToken;
+        if (JsonGetString(utf8, "hostToken", hostToken) && !hostToken.empty()) {
+            RegSaveHostToken(Utf8ToWide(hostToken));
+        }
         ShowPairingDialog(Utf8ToWide(pin), Utf8ToWide(deviceId_), qrPNG_);
+    } else if (event == "online") {
+        // Token reconnect: the relay does not re-send `registered`; rebuild
+        // the pairing from persisted state.
+        registered_ = true;
+        if (registerTimerId_ != 0) {
+            KillTimer(hwnd_, kRegisterTimerId);
+            registerTimerId_ = 0;
+        }
+        ShowPairingDialog(StablePairingPin(), Utf8ToWide(deviceId_), qrPNG_);
     }
 }
 

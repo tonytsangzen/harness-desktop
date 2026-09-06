@@ -728,8 +728,13 @@ final class MobileRemoteManager {
         }
         // Persisted hostToken lets a bridge restart reconnect by token instead
         // of re-registering — the relay refuses anonymous re-registration of an
-        // existing hostId (hijack protection).
-        if let tok = UserDefaults.standard.string(forKey: "mobileHostToken"), !tok.isEmpty {
+        // existing hostId (hijack protection). Only reuse the token when it was
+        // issued for THIS device id: the id derivation changed once, and a
+        // token for a different hostId would silently attach the bridge to a
+        // host the phone's QR no longer references.
+        let storedTokenDeviceId = UserDefaults.standard.string(forKey: "mobileHostTokenDeviceId")
+        if let tok = UserDefaults.standard.string(forKey: "mobileHostToken"), !tok.isEmpty,
+           storedTokenDeviceId == deviceID {
             args += ["--host-token", tok]
         }
         p.arguments = args
@@ -806,8 +811,10 @@ final class MobileRemoteManager {
             guard let hostId = json["hostId"] as? String,
                   let hostToken = json["hostToken"] as? String,
                   let pin = json["pin"] as? String else { return }
-            // Persist the token so the next bridge start reconnects by token.
+            // Persist the token (plus the hostId it belongs to) so the next
+            // bridge start reconnects by token.
             UserDefaults.standard.set(hostToken, forKey: "mobileHostToken")
+            UserDefaults.standard.set(hostId, forKey: "mobileHostTokenDeviceId")
             onRegistered?(Pairing(
                 hostId: hostId,
                 hostToken: hostToken,
@@ -815,7 +822,17 @@ final class MobileRemoteManager {
                 pinExpiresAt: (json["pinExpiresAt"] as? NSNumber)?.int64Value ?? 0
             ))
         case "online":
-            break // bridge reconnected; pairing window already shown
+            // Token reconnect: the relay does not re-send `registered`, so
+            // rebuild the pairing from persisted state — reaching here means
+            // the relay accepted the stored token.
+            guard let hostToken = UserDefaults.standard.string(forKey: "mobileHostToken"),
+                  !hostToken.isEmpty else { break }
+            onRegistered?(Pairing(
+                hostId: deviceID,
+                hostToken: hostToken,
+                pin: StablePairingPin(),
+                pinExpiresAt: 0
+            ))
         case "offline":
             break
         default:

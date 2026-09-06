@@ -1,5 +1,10 @@
 ## [1.2.1] - 2026-09-06
 
+### 修复（第二次启动报「中继服务器不可用」）
+
+- **token 重连被误判为失败**：bridge 持久化 hostToken 后，重启应用走 token 重连，relay 不会重发 `registered`（只发 `online`），而壳只认 `registered`——12 秒超时后误报中继不可用。现在三端都把 `online` 视为配对成功（用持久化的 token/PIN/设备 ID 重建配对信息）
+- **Linux/Windows 补上 hostToken 持久化**：此前只有 macOS 存 token，Linux/Windows 每次启动匿名重注册，会被 hijack 保护拒绝（部署新版 relay 后）——现在同样持久化并按 token 重连
+
 ### 修复（新版 dsh 白屏：web 服务新增 token 鉴权）
 
 dsh 前端更新后，`dsh web` 启动改为颁发带 token 的 URL（`dsh web: http://…/?token=…`），并对无会话 cookie 的 `/` 与 `/api/*` 回 401——桌面壳此前加载裸 `/`，窗口直接白屏。

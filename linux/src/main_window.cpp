@@ -1431,26 +1431,31 @@ void MainWindow::StartMobileBridge(const std::string& relay, const std::string& 
 
     std::string portStr = std::to_string(settings_->port);
     std::string pin = StablePairingPin();
+    // Persisted hostToken lets a bridge restart reconnect by token instead of
+    // re-registering — the relay refuses anonymous re-registration of an
+    // existing hostId (hijack protection).
+    std::string hostToken = ReadFileText(ConfigDir() + "/hosttoken");
     // dsh's tokened web URL (parsed from its stdout); lets the bridge log in
     // to token-authenticated dsh builds. NULL for older dsh (no auth).
     const gchar* dshUrlArg = authUrl_.empty() ? nullptr : authUrl_.c_str();
-    gchar* argv[] = { const_cast<gchar*>(node.c_str()),
-                      const_cast<gchar*>(bridge.c_str()),
-                      const_cast<gchar*>("--relay"),
-                      const_cast<gchar*>(relay.c_str()),
-                      const_cast<gchar*>("--dsh-port"),
-                      const_cast<gchar*>(portStr.c_str()),
-                      const_cast<gchar*>("--device-id"),
-                      const_cast<gchar*>(deviceId.c_str()),
-                      const_cast<gchar*>("--pin"),
-                      const_cast<gchar*>(pin.c_str()),
-                      const_cast<gchar*>("--dsh-url"),
-                      const_cast<gchar*>(dshUrlArg ? dshUrlArg : ""),
-                      nullptr };
+    std::vector<const char*> argStorage = {
+        node.c_str(), bridge.c_str(), "--relay", relay.c_str(),
+        "--dsh-port", portStr.c_str(), "--device-id", deviceId.c_str(),
+        "--pin", pin.c_str(), "--dsh-url", (dshUrlArg ? dshUrlArg : ""),
+    };
+    if (!hostToken.empty()) {
+        argStorage.push_back("--host-token");
+        argStorage.push_back(hostToken.c_str());
+    }
+    argStorage.push_back(nullptr);
+    std::vector<gchar*> argv;
+    argv.reserve(argStorage.size());
+    for (auto* a : argStorage) argv.push_back(const_cast<gchar*>(a));
+    gchar** argvArr = argv.data();
     gint stdoutFd = -1;
     GError* err = nullptr;
     GPid pid = 0;
-    if (!g_spawn_async_with_pipes(nullptr, argv, nullptr,
+    if (!g_spawn_async_with_pipes(nullptr, argvArr, nullptr,
                                   static_cast<GSpawnFlags>(G_SPAWN_DO_NOT_REAP_CHILD),
                                   nullptr, nullptr, &pid, nullptr, &stdoutFd, nullptr, &err)) {
         ShowError(std::string("bridge: ") + (err ? err->message : "spawn failed"));
@@ -1514,7 +1519,20 @@ gboolean MainWindow::OnBridgeOutput(GIOChannel* channel, GIOCondition cond, gpoi
                 g_source_remove(self->registerTimeoutId_);
                 self->registerTimeoutId_ = 0;
             }
+            // Persist the token so the next bridge start reconnects by token
+            // (the relay refuses anonymous re-registration of a known hostId).
+            std::string hostToken = fieldOf(line, "hostToken");
+            if (!hostToken.empty()) WriteFileText(ConfigDir() + "/hosttoken", hostToken);
             self->ShowPairingDialog(fieldOf(line, "pin"), self->deviceId_, self->qrPNG_);
+        } else if (event == "online") {
+            // Token reconnect: the relay does not re-send `registered`; rebuild
+            // the pairing from persisted state.
+            self->registered_ = true;
+            if (self->registerTimeoutId_ > 0) {
+                g_source_remove(self->registerTimeoutId_);
+                self->registerTimeoutId_ = 0;
+            }
+            self->ShowPairingDialog(StablePairingPin(), self->deviceId_, self->qrPNG_);
         }
     }
     return TRUE;
