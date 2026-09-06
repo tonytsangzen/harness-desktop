@@ -28,7 +28,8 @@ class WebviewPage extends StatefulWidget {
   State<WebviewPage> createState() => _WebviewPageState();
 }
 
-class _WebviewPageState extends State<WebviewPage> {
+class _WebviewPageState extends State<WebviewPage>
+    with WidgetsBindingObserver {
   WebProxy? _proxy;
   PortBackend? _proxyBackend; // the backend the running proxy dials through
   WebViewController? _controller;
@@ -40,9 +41,19 @@ class _WebviewPageState extends State<WebviewPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _wasOnline = widget.state.connected;
     widget.state.addListener(_onStateChanged);
     _bootstrap();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Screen unlocked / app back in foreground: the tunnel likely died while
+    // locked — skip the remaining backoff and reconnect right away.
+    if (state == AppLifecycleState.resumed) {
+      widget.state.resumeReconnect();
+    }
   }
 
   void _onStateChanged() {
@@ -184,6 +195,7 @@ class _WebviewPageState extends State<WebviewPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.state.removeListener(_onStateChanged);
     ForegroundService.stop();
     _proxy?.close();

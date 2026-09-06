@@ -234,6 +234,10 @@ class AppState extends ChangeNotifier {
 
   Future<void> _attach(SavedConnection conn) async {
     _closing = false;
+    // Drop the previous tunnel first: reconnects swap in a fresh client and
+    // the old WSS socket (zombie after a screen-lock drop) must not leak.
+    client?.close();
+    client = null;
     final c = RelayClient(
       relayBase: conn.relay,
       sessionToken: conn.sessionToken,
@@ -259,6 +263,10 @@ class AppState extends ChangeNotifier {
     try {
       await c.connect();
       connected = true;
+      // The client never reports a successful attach (only disconnects), so
+      // without this notification the reconnecting overlay would stay up and
+      // the remote view would never rebuild its proxy after a drop.
+      notifyListeners();
     } catch (e) {
       _log('connect error: $e');
       error = '连接失败: $e';
@@ -267,6 +275,21 @@ class AppState extends ChangeNotifier {
       // for a fresh PIN on RelayError('unauthorized').
       rethrow;
     }
+  }
+
+  /// App resumed (screen unlocked / returned to foreground): the tunnel may
+  /// have died while locked and the backoff timer can still be up to 30s
+  /// away — retry immediately with a fresh attempt count.
+  void resumeReconnect() {
+    if (_closing || connected || currentConnection == null) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempt = 0;
+    final conn = currentConnection!;
+    _log('app resumed: reconnecting now');
+    _attach(conn).catchError((Object e) {
+      _log('resume reconnect failed: $e');
+    });
   }
 
   /// Disconnect the current tunnel without removing the saved connection.
