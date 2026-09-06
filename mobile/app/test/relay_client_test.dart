@@ -1,16 +1,13 @@
-/// Unit tests for RelayClient frame protocol and SseFrame parsing.
+/// Unit tests for the device-side opaque port tunnel.
 library;
 
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:dsh_mobile/core/dsh_types.dart';
 import 'package:dsh_mobile/core/relay_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stream_channel/stream_channel.dart';
 
-/// Fake channel: a broadcast stream we push server frames into, recording
-/// everything the client sends.
 class FakeChannel with StreamChannelMixin<dynamic> {
   FakeChannel() {
     _outController.stream.listen((data) {
@@ -25,139 +22,110 @@ class FakeChannel with StreamChannelMixin<dynamic> {
   final List<Map<String, dynamic>> sent = [];
 
   @override
-  Stream get stream => _controller.stream;
+  Stream<dynamic> get stream => _controller.stream;
 
   @override
   StreamSink<dynamic> get sink => _outController.sink;
 
-  void server(Map<String, dynamic> frame) =>
-      _controller.add(jsonEncode(frame));
+  void server(Map<String, dynamic> frame) => _controller.add(jsonEncode(frame));
+
+  Future<void> close() async {
+    await _controller.close();
+    await _outController.close();
+  }
 }
 
-RelayClient makeClient(FakeChannel ch) => RelayClient(
-      relayBase: 'https://relay.example.com',
-      sessionToken: 'st_test',
-      connector: (uri, {headers}) {
-        expect(uri.toString(), 'wss://relay.example.com/relay/v1/device');
-        expect(headers?['Authorization'], 'Bearer st_test');
-        return ch;
-      },
-    );
+RelayClient makeClient(FakeChannel channel) => RelayClient(
+  relayBase: 'https://relay.example.com',
+  sessionToken: 'st_test',
+  connector: (uri, {headers}) {
+    expect(uri.toString(), 'wss://relay.example.com/relay/v1/device');
+    expect(headers?['Authorization'], 'Bearer st_test');
+    return channel;
+  },
+);
+
+Future<void> settle() => Future<void>.delayed(const Duration(milliseconds: 20));
 
 void main() {
-  test('rpc sends proper frame and resolves with result.value', () async {
-    final ch = FakeChannel();
-    final c = makeClient(ch);
-    await c.connect();
+  test('connect sends a ping and answers relay ping with pong', () async {
+    final channel = FakeChannel();
+    final client = makeClient(channel);
+    await client.connect();
+    expect(channel.sent.first['type'], 'ping');
 
-    final future = c.rpc('session.list', const {});
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-    // connect() emits one tunnel-confirming ping first; the rpc follows.
-    final sent = ch.sent.firstWhere((f) => f['type'] == 'rpc');
-    expect(sent['path'], '/api/session.list');
-    expect(sent['body'], const {});
-
-    ch.server({
-      'v': 1, 'type': 'rpc-reply',
-      'rpcId': sent['rpcId'],
-      'body': {'ok': true, 'value': {'items': []}},
-    });
-    final value = await future;
-    expect(value, {'items': []});
+    channel.server({'v': 1, 'type': 'ping'});
+    await settle();
+    expect(channel.sent.any((frame) => frame['type'] == 'pong'), isTrue);
+    client.close();
+    await channel.close();
   });
 
-  test('rpc error surfaces as RelayError', () async {
-    final ch = FakeChannel();
-    final c = makeClient(ch);
-    await c.connect();
+  test('connectPort forwards opaque bytes in both directions', () async {
+    final channel = FakeChannel();
+    final client = makeClient(channel);
+    await client.connect();
+    final connection = await client.connectPort(3080);
+    await settle();
 
-    final future = c.rpc('session.list');
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-    ch.server({
-      'v': 1, 'type': 'rpc-reply',
-      'rpcId': ch.sent.firstWhere((f) => f['type'] == 'rpc')['rpcId'],
-      'body': {'ok': false, 'error': {'code': 'host-offline'}},
+    final open = channel.sent.firstWhere(
+      (frame) => frame['type'] == 'stream-open',
+    );
+    expect(open['port'], 3080);
+    final streamId = open['streamId'] as String;
+
+    final received = <List<int>>[];
+    final subscription = connection.input.listen(received.add);
+    final remoteBytes = <int>[0, 1, 2, 127, 128, 254, 255];
+    channel.server({
+      'v': 1,
+      'type': 'stream-data',
+      'streamId': streamId,
+      'data': base64Encode(remoteBytes),
     });
-    await expectLater(future, throwsA(isA<RelayError>()));
+    await settle();
+    expect(received, [remoteBytes]);
+
+    final localBytes = <int>[255, 0, 13, 10, 42];
+    connection.add(localBytes);
+    await settle();
+    final data = channel.sent.lastWhere(
+      (frame) => frame['type'] == 'stream-data',
+    );
+    expect(data['streamId'], streamId);
+    expect(base64Decode(data['data'] as String), localBytes);
+
+    await connection.close();
+    await settle();
+    final close = channel.sent.lastWhere(
+      (frame) => frame['type'] == 'stream-close',
+    );
+    expect(close['streamId'], streamId);
+    await subscription.cancel();
+    client.close();
+    await channel.close();
   });
 
-  test('ping answered with pong', () async {
-    final ch = FakeChannel();
-    final c = makeClient(ch);
-    await c.connect();
-    ch.server({'v': 1, 'type': 'ping'});
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-    expect(ch.sent.any((f) => f['type'] == 'pong'), isTrue);
-  });
+  test('relay stream-close completes the corresponding input stream', () async {
+    final channel = FakeChannel();
+    final client = makeClient(channel);
+    await client.connect();
+    final connection = await client.connectPort(3080);
+    await settle();
+    final streamId = channel.sent.firstWhere(
+      (frame) => frame['type'] == 'stream-open',
+    )['streamId'];
 
-  test('connect sends a tunnel-confirming ping', () async {
-    final ch = FakeChannel();
-    final c = makeClient(ch);
-    await c.connect();
-    expect(ch.sent.first['type'], 'ping');
-  });
-
-  test('sse-open dispatches frames and responds', () async {
-    final ch = FakeChannel();
-    final c = makeClient(ch);
-    await c.connect();
-
-    final frames = <SseFrame>[];
-    final chId = c.openSse('/api/events.mux', onFrame: frames.add);
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-    final open = ch.sent.firstWhere((f) => f['type'] == 'sse-open');
-    expect(open['channel'], chId);
-
-    ch.server({
-      'v': 1, 'type': 'sse-frame', 'channel': chId,
-      'body': {
-        'rpcId': 'rpc_ap1', 'method': 'events.mux',
-        'payload': {'type': 'approval/requested', 'sessionId': 's1', 'approvalId': 'ap1', 'toolName': 'bash'},
-      },
-    });
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-    expect(frames, hasLength(1));
-    expect(frames.first.type, 'approval/requested');
-    expect(frames.first.rpcId, 'rpc_ap1');
-    expect(frames.first.summary, contains('审批'));
-
-    // Answer it; respond frame echoes the approval rpcId.
-    final answer = c.respond('rpc_ap1', {'approvalId': 'ap1', 'outcome': 'approved'});
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-    final sent = ch.sent.last;
-    expect(sent['type'], 'respond');
-    expect(sent['rpcId'], 'rpc_ap1');
-    expect(sent['path'], '/api/respond');
-    ch.server({
-      'v': 1, 'type': 'rpc-reply', 'rpcId': 'rpc_ap1',
-      'body': {'ok': true, 'value': {'accepted': true}},
-    });
-    expect((await answer)['accepted'], isTrue);
-  });
-
-  test('SseFrame parsing of jobs and step events', () {
-    final jobs = SseFrame.fromJson({
-      'rpcId': 'r1', 'method': 'events.mux',
-      'payload': {
-        'type': 'session/jobs', 'sessionId': 's1',
-        'jobs': [
-          {'id': 'bash-1', 'kind': 'bash', 'label': 'npm install', 'status': 'running', 'startedAt': 1},
-          {'id': 'subagent-2', 'kind': 'subagent', 'label': '调研', 'status': 'completed', 'startedAt': 2, 'finishedAt': 3},
-        ],
-      },
-    });
-    expect(jobs.jobs, hasLength(2));
-    expect(jobs.jobs.first.isActive, isTrue);
-    expect(jobs.summary, contains('1 运行中'));
-
-    final step = SseFrame.fromJson({
-      'rpcId': 'r2', 'method': 'events.mux',
-      'payload': {
-        'type': 'session/event', 'sessionId': 's1',
-        'event': {'type': 'step/start', 'seq': 1, 'data': {'turn': 0, 'step': 0}},
-      },
-    });
-    expect(step.eventType, 'step/start');
-    expect(step.summary, startsWith('▶'));
+    var done = false;
+    final subscription = connection.input.listen(
+      (_) {},
+      onDone: () => done = true,
+    );
+    channel.server({'v': 1, 'type': 'stream-close', 'streamId': streamId});
+    await settle();
+    expect(done, isTrue);
+    await subscription.cancel();
+    client.close();
+    await channel.close();
   });
 }

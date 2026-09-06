@@ -1,14 +1,11 @@
-// Package main implements the Mobile Relay (protocol spec docs/mobile-relay-protocol.md):
-// WSS host/device tunnels + control plane (register/pair/refresh/revoke) with
-// channel multiplexed forwarding between a host bridge and phone devices.
+// Package main implements the Mobile Relay: registration/pairing plus an
+// opaque, multiplexed TCP-port byte tunnel between a host bridge and devices.
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -21,18 +18,19 @@ import (
 	"github.com/tonytsangzen/harness-desktop/mobile/relay/store"
 )
 
-// Frame is the wire frame shared by both tunnels (spec §3).
+// Frame is the relay control/transport envelope. Data is an opaque base64
+// encoded chunk from the relay's point of view; only the two endpoints know
+// whether it contains HTTP, WebSocket, or any other application protocol.
 type Frame struct {
-	V       int             `json:"v"`
-	Type    string          `json:"type"`
-	Kind    string          `json:"kind,omitempty"`
-	Channel string          `json:"channel,omitempty"`
-	RpcID   string          `json:"rpcId,omitempty"`
-	ID      string          `json:"id,omitempty"`
-	Status  int             `json:"status,omitempty"`
-	Method  string          `json:"method,omitempty"`
-	Path    string          `json:"path,omitempty"`
-	Body    json.RawMessage `json:"body,omitempty"`
+	V    int             `json:"v"`
+	Type string          `json:"type"`
+	Kind string          `json:"kind,omitempty"`
+	Body json.RawMessage `json:"body,omitempty"`
+	// Stream fields are transport-only. The relay never interprets Data.
+	StreamID string `json:"streamId,omitempty"`
+	Port     int    `json:"port,omitempty"`
+	Data     string `json:"data,omitempty"` // base64 encoded TCP bytes
+	Reason   string `json:"reason,omitempty"`
 }
 
 const (
@@ -104,9 +102,9 @@ type hub struct {
 	store *store.Store
 
 	mu          sync.RWMutex
-	hostConns   map[string]*conn   // hostID -> conn
-	deviceConns map[string]*conn   // deviceID -> conn
-	channels    map[string]string  // channel -> deviceID (for host->device routing)
+	hostConns   map[string]*conn  // hostID -> conn
+	deviceConns map[string]*conn  // deviceID -> conn
+	streams     map[string]string // hostID/streamID -> deviceID
 }
 
 func newHub(st *store.Store) *hub {
@@ -114,8 +112,28 @@ func newHub(st *store.Store) *hub {
 		store:       st,
 		hostConns:   map[string]*conn{},
 		deviceConns: map[string]*conn{},
-		channels:    map[string]string{},
+		streams:     map[string]string{},
 	}
+}
+
+func (h *hub) streamKey(hostID, streamID string) string { return hostID + "/" + streamID }
+
+func (h *hub) bindStream(hostID, streamID, deviceID string) {
+	h.mu.Lock()
+	h.streams[h.streamKey(hostID, streamID)] = deviceID
+	h.mu.Unlock()
+}
+
+func (h *hub) streamDevice(hostID, streamID string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.streams[h.streamKey(hostID, streamID)]
+}
+
+func (h *hub) unbindStream(hostID, streamID string) {
+	h.mu.Lock()
+	delete(h.streams, h.streamKey(hostID, streamID))
+	h.mu.Unlock()
 }
 
 func (h *hub) attachHost(id string, c *conn) (kicked bool) {
@@ -168,14 +186,13 @@ func (h *hub) deviceConn(id string) *conn {
 func (h *hub) detachDevice(id string, c *conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.deviceConns[id] == c {
-		delete(h.deviceConns, id)
+	if h.deviceConns[id] != c {
+		return
 	}
-	// Channels owned by the departed device can never be answered; drop them
-	// so a reused channel name rebinds to the current owner.
-	for ch, dev := range h.channels {
+	delete(h.deviceConns, id)
+	for stream, dev := range h.streams {
 		if dev == id {
-			delete(h.channels, ch)
+			delete(h.streams, stream)
 		}
 	}
 }
@@ -194,7 +211,7 @@ func (h *hub) toHost(hostID string, f Frame) string {
 	return ""
 }
 
-// toDevice delivers a frame from a host to a device (via channel routing).
+// toDevice delivers a frame from a host to a device.
 func (h *hub) toDevice(deviceID string, f Frame) string {
 	h.mu.RLock()
 	c, ok := h.deviceConns[deviceID]
@@ -206,21 +223,6 @@ func (h *hub) toDevice(deviceID string, f Frame) string {
 		return "overflow"
 	}
 	return ""
-}
-
-func (h *hub) channelDevice(hostID, ch string) string {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	// Channel keys are scoped per host (hostID/channel) so a channel name used
-	// by devices of two different hosts can never cross-route replies.
-	return h.channels[hostID+"/"+ch]
-}
-
-func (h *hub) bindChannel(hostID, ch, deviceID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	// Latest opener wins: a reused channel name belongs to the current device.
-	h.channels[hostID+"/"+ch] = deviceID
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -606,38 +608,16 @@ func (s *server) handleHost(w http.ResponseWriter, r *http.Request) {
 		switch f.Type {
 		case "ping":
 			c.writeJSON(map[string]any{"v": 1, "type": "pong"})
-		case "rpc-reply", "sse-frame", "sse-close", "http-reply", "signal":
-			// Host -> device: route by channel (scoped to this host).
-			dev := s.hub.channelDevice(host.ID, f.Channel)
+		case "stream-data", "stream-close":
+			// Host -> device: route only by the opaque stream identity.
+			dev := s.hub.streamDevice(host.ID, f.StreamID)
 			if dev != "" {
 				if code := s.hub.toDevice(dev, f); code != "" {
-					log.Printf("host->device: route failed ch=%q code=%q", truncate(f.Channel, 12), code)
-				} else {
-					// Summarize rpc-reply bodies so the session list contents
-					// are visible without dumping the whole payload.
-					summary := ""
-					if f.Type == "rpc-reply" {
-						var body struct {
-							OK    bool `json:"ok"`
-							Value struct {
-								Items []json.RawMessage `json:"items"`
-							} `json:"value"`
-							Error *struct {
-								Code string `json:"code"`
-							} `json:"error"`
-						}
-						if json.Unmarshal(f.Body, &body) == nil {
-							if body.OK {
-								summary = fmt.Sprintf(" ok=true items=%d", len(body.Value.Items))
-							} else if body.Error != nil {
-								summary = fmt.Sprintf(" ok=false code=%q", body.Error.Code)
-							}
-						}
-					}
-					log.Printf("host->device: forwarded type=%q ch=%q rpcId=%q%s", f.Type, f.Channel, f.RpcID, summary)
+					log.Printf("host->device: stream route failed stream=%q code=%q", truncate(f.StreamID, 12), code)
 				}
-			} else {
-				log.Printf("host->device: no device bound to channel %q", f.Channel)
+			}
+			if f.Type == "stream-close" {
+				s.hub.unbindStream(host.ID, f.StreamID)
 			}
 		default:
 			// ignore unknown host frames
@@ -670,34 +650,28 @@ func (s *server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		switch f.Type {
 		case "ping":
 			c.writeJSON(map[string]any{"v": 1, "type": "pong"})
-		case "rpc", "sse-open", "respond", "http", "signal":
-			if f.Channel != "" && f.Type != "sse-close" {
-				s.hub.bindChannel(sess.HostID, f.Channel, sess.DeviceID)
+		case "stream-open":
+			if f.StreamID == "" || f.Port <= 0 || f.Port > 65535 {
+				c.writeJSON(map[string]any{
+					"v": 1, "type": "stream-close", "streamId": f.StreamID,
+					"reason": "invalid-stream",
+				})
+				return
 			}
+			s.hub.bindStream(sess.HostID, f.StreamID, sess.DeviceID)
 			if code := s.hub.toHost(sess.HostID, f); code != "" {
-				// Transport-level error reply to the device, shaped by frame type
-				// so the bridge resolves its pending request immediately instead
-				// of hanging until its own timeout.
-				log.Printf("device->host: route failed type=%q ch=%q code=%q",
-					f.Type, truncate(f.Channel, 12), code)
-				if f.Type == "http" {
-					c.writeJSON(map[string]any{
-						"v": 1, "type": "http-reply", "id": f.ID, "channel": f.Channel,
-						"status": 502,
-						"body": map[string]any{
-							"headers": map[string]string{"content-type": "text/plain; charset=utf-8"},
-							"body":    base64.StdEncoding.EncodeToString([]byte("desktop host offline: " + code)),
-						},
-					})
-				} else {
-					c.writeJSON(map[string]any{
-						"v": 1, "type": "rpc-reply", "channel": f.Channel, "rpcId": f.RpcID,
-						"body": map[string]any{"transport": true, "error": map[string]string{"code": code}},
-					})
-				}
-			} else {
-				log.Printf("device->host: forwarded type=%q path=%q ch=%q rpcId=%q",
-					f.Type, f.Path, f.Channel, f.RpcID)
+				s.hub.unbindStream(sess.HostID, f.StreamID)
+				c.writeJSON(map[string]any{
+					"v": 1, "type": "stream-close", "streamId": f.StreamID,
+					"reason": code,
+				})
+			}
+		case "stream-data", "stream-close":
+			if code := s.hub.toHost(sess.HostID, f); code != "" {
+				log.Printf("device->host: stream route failed stream=%q code=%q", truncate(f.StreamID, 12), code)
+			}
+			if f.Type == "stream-close" {
+				s.hub.unbindStream(sess.HostID, f.StreamID)
 			}
 		default:
 			// ignore

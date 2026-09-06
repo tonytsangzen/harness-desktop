@@ -1796,11 +1796,6 @@ void MainWindow::StartBridge(const std::wstring& relay, const std::string& devic
     if (std::wstring tok; RegGetHostToken(tok)) {
         cmd += L" --host-token " + tok;
     }
-    // dsh's tokened web URL (parsed from its stdout); lets the bridge log in
-    // to token-authenticated dsh builds.
-    if (!ServerManager::AuthUrl().empty()) {
-        cmd += L" --dsh-url " + ServerManager::AuthUrl();
-    }
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;

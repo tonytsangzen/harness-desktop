@@ -683,9 +683,6 @@ final class MobileRemoteManager {
     let relayURL: String
     let deviceID: String
     let dshPort: UInt16
-    /// Tokened dsh web URL (see ServerManager.authURL); nil for older dsh.
-    let dshURL: String?
-
     private var process: Process?
     private var stdoutBuffer = Data()
     private(set) var isRunning = false
@@ -702,14 +699,12 @@ final class MobileRemoteManager {
     /// while the Remote Connect toggle is on.
     var autoRestart = false
 
-    init(nodePath: String, bridgePath: URL, relayURL: String, deviceID: String, dshPort: UInt16,
-         dshURL: String? = nil) {
+    init(nodePath: String, bridgePath: URL, relayURL: String, deviceID: String, dshPort: UInt16) {
         self.nodePath = nodePath
         self.bridgePath = bridgePath
         self.relayURL = relayURL
         self.deviceID = deviceID
         self.dshPort = dshPort
-        self.dshURL = dshURL
     }
 
     func start() {
@@ -732,9 +727,6 @@ final class MobileRemoteManager {
         p.executableURL = URL(fileURLWithPath: nodePath)
         var args = [bridgePath.path, "--relay", relayURL, "--dsh-port", "\(dshPort)",
                     "--device-id", deviceID, "--pin", StablePairingPin()]
-        if let dshURL = dshURL {
-            args += ["--dsh-url", dshURL]
-        }
         // Persisted hostToken lets a bridge restart reconnect by token instead
         // of re-registering — the relay refuses anonymous re-registration of an
         // existing hostId (hijack protection). Only reuse the token when it was
@@ -2519,8 +2511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         let m = MobileRemoteManager(nodePath: node, bridgePath: bridge,
                                     relayURL: relay, deviceID: deviceID,
-                                    dshPort: server.activePort,
-                                    dshURL: server.authURL?.absoluteString)
+                                    dshPort: server.activePort)
         // While the toggle is on, an unexpected bridge exit re-spawns and
         // re-registers with the relay automatically.
         m.autoRestart = true

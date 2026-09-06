@@ -1435,13 +1435,10 @@ void MainWindow::StartMobileBridge(const std::string& relay, const std::string& 
     // re-registering — the relay refuses anonymous re-registration of an
     // existing hostId (hijack protection).
     std::string hostToken = ReadFileText(ConfigDir() + "/hosttoken");
-    // dsh's tokened web URL (parsed from its stdout); lets the bridge log in
-    // to token-authenticated dsh builds. NULL for older dsh (no auth).
-    const gchar* dshUrlArg = authUrl_.empty() ? nullptr : authUrl_.c_str();
     std::vector<const char*> argStorage = {
         node.c_str(), bridge.c_str(), "--relay", relay.c_str(),
         "--dsh-port", portStr.c_str(), "--device-id", deviceId.c_str(),
-        "--pin", pin.c_str(), "--dsh-url", (dshUrlArg ? dshUrlArg : ""),
+        "--pin", pin.c_str(),
     };
     if (!hostToken.empty()) {
         argStorage.push_back("--host-token");

@@ -1,4 +1,4 @@
-/// App-wide state: pairing, tunnel connection, session list cache.
+/// App-wide state: pairing and tunnel connection.
 library;
 
 import 'dart:async';
@@ -9,12 +9,11 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-import 'dsh_types.dart';
 import 'relay_client.dart';
 
 class AppState extends ChangeNotifier {
   AppState({FlutterSecureStorage? storage})
-      : _storage = storage ?? const FlutterSecureStorage();
+    : _storage = storage ?? const FlutterSecureStorage();
 
   static const _kConnections = 'connections_v1';
 
@@ -27,17 +26,12 @@ class AppState extends ChangeNotifier {
   bool connected = false;
   bool busy = false;
   String? error;
-  List<SessionSummary> sessions = const [];
 
   /// Saved pairings (multiple terminals); shown as cards on the home page.
   List<SavedConnection> connections = const [];
 
   /// The connection the remote view is bound to (for LAN-direct mode).
   SavedConnection? currentConnection;
-
-  /// Last raw session.list reply (truncated) — shown on the sessions page
-  /// when the list is empty, for on-device diagnosis.
-  String? debugLastReply;
 
   /// Auto-reconnect state for the relay tunnel: when the socket drops
   /// (network switch, relay hiccup, Android backgrounding) the tunnel
@@ -51,10 +45,15 @@ class AppState extends ChangeNotifier {
       final raw = await _storage.read(key: _kConnections);
       if (raw != null && raw.isNotEmpty) {
         final list = jsonDecode(raw) as List;
-        connections = list
-            .map((e) => SavedConnection.fromJson((e as Map).cast<String, dynamic>()))
-            .toList()
-          ..sort((a, b) => b.pairedAt.compareTo(a.pairedAt));
+        connections =
+            list
+                .map(
+                  (e) => SavedConnection.fromJson(
+                    (e as Map).cast<String, dynamic>(),
+                  ),
+                )
+                .toList()
+              ..sort((a, b) => b.pairedAt.compareTo(a.pairedAt));
         _log('init: loaded ${connections.length} connections');
       }
     } catch (e) {
@@ -90,7 +89,8 @@ class AppState extends ChangeNotifier {
   /// stall the connect flow — the relay path is started in parallel anyway.
   static Future<bool> lanAvailable(String lan) async {
     try {
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 1);
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 1);
       try {
         final req = await client.getUrl(Uri.parse('http://$lan/'));
         final resp = await req.close().timeout(const Duration(seconds: 1));
@@ -135,11 +135,15 @@ class AppState extends ChangeNotifier {
       );
       connections = [
         conn,
-        ...connections.where((c) => !(c.relay == relayBase && c.hostId == deviceId)),
+        ...connections.where(
+          (c) => !(c.relay == relayBase && c.hostId == deviceId),
+        ),
       ];
       currentConnection = conn;
       await _saveConnections();
-      _log('pair saved connection hostId=$deviceId total=${connections.length}');
+      _log(
+        'pair saved connection hostId=$deviceId total=${connections.length}',
+      );
       await _attach(relayBase, json['sessionToken'] as String);
     } catch (e) {
       _log('pair FAILED: $e');
@@ -168,7 +172,9 @@ class AppState extends ChangeNotifier {
       );
       connections = [
         updated,
-        ...connections.where((c) => !(c.relay == conn.relay && c.hostId == conn.hostId)),
+        ...connections.where(
+          (c) => !(c.relay == conn.relay && c.hostId == conn.hostId),
+        ),
       ];
       currentConnection = updated;
       await _saveConnections();
@@ -186,7 +192,10 @@ class AppState extends ChangeNotifier {
   /// POST /relay/v1/pair; returns the parsed JSON body. Throws RelayError on
   /// non-200 (pair-invalid / pair-locked / pair-expired / relay unreachable).
   Future<Map<String, dynamic>> _pairRequest(
-      String relayBase, String deviceId, String pin) async {
+    String relayBase,
+    String deviceId,
+    String pin,
+  ) async {
     final uri = Uri.parse('$relayBase/relay/v1/pair');
     _log('pair POST $uri deviceId=$deviceId');
     final resp = await HttpClient()
@@ -198,7 +207,9 @@ class AppState extends ChangeNotifier {
         })
         .timeout(const Duration(seconds: 15));
     final body = await resp.transform(utf8.decoder).join();
-    _log('pair resp status=${resp.statusCode} body=${body.length > 200 ? '${body.substring(0, 200)}…' : body}');
+    _log(
+      'pair resp status=${resp.statusCode} body=${body.length > 200 ? '${body.substring(0, 200)}…' : body}',
+    );
     if (resp.statusCode != 200) {
       String code = 'pair-failed';
       try {
@@ -218,7 +229,6 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       if (online) {
         _reconnectAttempt = 0;
-        refreshSessions();
       } else {
         _scheduleReconnect(c, relayBase, token);
       }
@@ -242,61 +252,39 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  Future<void> refreshSessions() async {
-    final c = client;
-    if (c == null) {
-      _log('refreshSessions: no client');
-      return;
-    }
-    try {
-      final value = await c.rpc('session.list', const {});
-      _log('session.list reply keys=${value.keys.toList()} itemsType=${value['items'].runtimeType}');
-      final raw = jsonEncode(value);
-      _log('session.list reply raw=${raw.length > 400 ? '${raw.substring(0, 400)}…' : raw}');
-      // Keep the raw reply (truncated) for on-device diagnosis.
-      debugLastReply = raw;
-      if (debugLastReply!.length > 600) {
-        debugLastReply = '${debugLastReply!.substring(0, 600)}…';
-      }
-      final items = value['items'] as List? ?? const [];
-      _log('session.list items=${items.length} first=${items.isNotEmpty ? jsonEncode(items.first).substring(0, (jsonEncode(items.first).length).clamp(0, 200)) : 'n/a'}');
-      sessions = items
-          .map((e) => SessionSummary.fromJson((e as Map).cast<String, dynamic>()))
-          .toList();
-      sessions.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
-      _log('session.list parsed sessions=${sessions.length}');
-    } catch (e, st) {
-      _log('refreshSessions ERROR: $e\n$st');
-      error = '会话列表: $e';
-    }
-    notifyListeners();
-  }
-
   /// Disconnect the current tunnel without removing the saved connection.
   Future<void> disconnect() async {
     _closing = true;
+    _generation++;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _reconnectAttempt = 0;
     client?.close();
     client = null;
     connected = false;
-    sessions = const [];
     notifyListeners();
   }
 
   /// Re-attach the relay tunnel after a drop, with exponential backoff
   /// (2s → 4s → 8s → 16s → 30s cap). Only runs while this connection is
   /// still the active one and the user hasn't disconnected.
+  /// Bumped whenever the user tears a connection down; pending reconnect
+  /// schedules from a torn-down client are invalidated by comparing it.
+  int _generation = 0;
+
   void _scheduleReconnect(RelayClient c, String relayBase, String token) {
-    if (_reconnectTimer != null) return;
-    if (client != c || _closing) return;
+    if (_reconnectTimer != null || _closing) return;
+    // Capture the generation, not the client instance: _attach() replaces
+    // `client` before it can fail, so comparing against `c` would cancel the
+    // whole chain after one failed attempt — the tunnel then never recovers
+    // and the page keeps serving stale data until a manual reconnect.
+    final gen = _generation;
     final attempt = _reconnectAttempt++;
     final delay = [2, 4, 8, 16, 30][math.min(attempt, 4)];
     _log('schedule reconnect in ${delay}s (attempt $attempt)');
     _reconnectTimer = Timer(Duration(seconds: delay), () {
       _reconnectTimer = null;
-      if (client != c || _closing) return;
+      if (_closing || gen != _generation) return;
       _log('reconnecting tunnel…');
       _attach(relayBase, token).catchError((Object e) {
         _log('reconnect failed: $e');
@@ -306,34 +294,6 @@ class AppState extends ChangeNotifier {
   }
 
   bool _closing = false;
-
-  /// Ask the desktop dsh which session is currently active (running=true).
-  /// Returns its id, or null when there is none / on any failure.
-  Future<String?> activeSessionId() async {
-    final c = client;
-    if (c == null) return null;
-    try {
-      final resp = await c.http('POST', '/api/session.list', headers: {
-        'Content-Type': 'application/json',
-      }, body: utf8.encode(jsonEncode({
-        'type': 'client-request',
-        'rpcId': 'mobile-${DateTime.now().millisecondsSinceEpoch}',
-        'method': 'session.list',
-        'params': <String, dynamic>{},
-        'payload': <String, dynamic>{},
-      })));
-      if (resp.status != 200) return null;
-      final data =
-          jsonDecode(utf8.decode(base64Decode(resp.bodyB64))) as Map<String, dynamic>;
-      final items = (data['result']?['value']?['items'] as List?) ?? const [];
-      for (final e in items) {
-        if ((e as Map)['running'] == true) return e['sessionId'] as String?;
-      }
-      return null;
-    } catch (_) {
-      return null;
-    }
-  }
 }
 
 /// A saved pairing to one terminal (host) — persisted across launches.
@@ -352,20 +312,22 @@ class SavedConnection {
   final String sessionToken;
   final String refreshToken;
   final int pairedAt;
+
   /// Optional "ip:port" of the desktop's dsh web on the LAN (from the QR) —
   /// the phone tries a direct connection first and falls back to the relay.
   final String? lan;
 
   Map<String, dynamic> toJson() => {
-        'relay': relay,
-        'hostId': hostId,
-        'sessionToken': sessionToken,
-        'refreshToken': refreshToken,
-        'pairedAt': pairedAt,
-        if (lan != null) 'lan': lan,
-      };
+    'relay': relay,
+    'hostId': hostId,
+    'sessionToken': sessionToken,
+    'refreshToken': refreshToken,
+    'pairedAt': pairedAt,
+    if (lan != null) 'lan': lan,
+  };
 
-  factory SavedConnection.fromJson(Map<String, dynamic> json) => SavedConnection(
+  factory SavedConnection.fromJson(Map<String, dynamic> json) =>
+      SavedConnection(
         relay: json['relay'] as String? ?? '',
         hostId: json['hostId'] as String? ?? '',
         sessionToken: json['sessionToken'] as String? ?? '',
