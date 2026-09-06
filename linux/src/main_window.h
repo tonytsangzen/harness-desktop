@@ -77,6 +77,7 @@ private:
     void StartServerAndPoll();
     static gboolean OnPollServer(gpointer userData);
     void OnServerReady();
+    void NavigateToDshWithAuth();
     void NavigateToDsh();
     static gint NavigateGraceTick(gpointer data);
     void OnServerFailed();
