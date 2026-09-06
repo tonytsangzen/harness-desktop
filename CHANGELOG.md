@@ -1,5 +1,20 @@
 ## [1.2.1] - 2026-09-06
 
+### 修复（新版 dsh 白屏：web 服务新增 token 鉴权）
+
+dsh 前端更新后，`dsh web` 启动改为颁发带 token 的 URL（`dsh web: http://…/?token=…`），并对无会话 cookie 的 `/` 与 `/api/*` 回 401——桌面壳此前加载裸 `/`，窗口直接白屏。
+
+- **桌面壳解析 token URL**：三端从 dsh 的 stdout/日志中解析该 URL 并加载（WebKit 跟随 303 拿到 30 天会话 cookie）；端口就绪但 token 行未到时短暂等待（≤5s），老版本 dsh 不打 token 行则照常加载裸 URL
+- **bridge 支持 `--dsh-url`**：壳把 token URL 传给远程桥；bridge 访问该 URL 登录一次拿会话 cookie，之后所有 dsh 请求（RPC/HTTP 代理/SSE/LAN 直连代理）都附加 cookie，401 时自动重新登录——手机端无需任何改动
+- **复用探测兼容**：三端「端口已被 dsh 占用则复用」的探测把 401 也视为 dsh 实例（此前只认 200，会导致重复拉起第二个空实例）
+
+### 优化（传输协议：跨连接磁盘缓存 + ETag/304）
+
+- **未变更文件零传输**：手机端新增持久化磁盘缓存（`DiskCache`，64 MB LRU，单条目上限 8 MB）。dsh 的静态资源 URL 本身携带内容身份（`/assets/<name>-<hash>.js`、`/plugins/**/client.js?rev=<hash>`，哈希变即 URL 变，不可能过期），这类文件首次下载后落盘，此后每次连接/重启直接从磁盘服务，完全不经中继隧道。入口 HTML（无内容哈希、可变）则持久化「原文 + ETag」，重连时用 If-None-Match 校验一次
+- **ETag/304 协议支持**（bridge）：dsh 服务器不发 ETag，改由 bridge 对响应体原文计算强 ETag（sha1）；请求带 `if-none-match` 且实体未变时回 304 空 body——入口 HTML 每次连接从 ~15KB 下载变为一次几百字节的往返
+- **并发请求合并**：本地代理对并发的同 URL GET 只发一次隧道请求（页面加载会并行拉取大量资源）
+- **修复**：bridge 侧 gzip 与手机端 polyfill 注入相互冲突——>2KB 的 HTML 被压缩后注入校验静默失效（1.2.0 起）；现代理层先解压再处理。同时修复缓存命中路径不关闭响应导致 WebView 请求挂起的隐患
+
 ### 修复（远端 relay 连接慢 / 不稳定 / plugin load failed）
 
 根因：插件 bundle 等大响应体此前以**单个巨型 base64 帧**走隧道，且手机端对每次请求有 **30s 总时长硬超时**、无重试。弱网/限速链路（relay 下行 ~1 Mbps 时，几 MB 的 bundle 需要数十秒）必然超时 → 502 → 页面显示 "Failed to load plugins"。叠加中继慢消费者静默丢帧、僵尸 TCP 半开连接最长 90s 假离线，表现为「时好时坏」。

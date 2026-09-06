@@ -11,7 +11,7 @@
 // the same LAN can load the desktop's dsh web directly through the LAN proxy.
 //
 // Usage: node bridge.mjs --relay wss://relay.example.com --dsh-port 3080
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { parseArgs } from "node:util";
 import { createServer, request as httpRequest } from "node:http";
@@ -38,6 +38,12 @@ const args = parseArgs({
     // LAN direct-connect port: the phone prefers loading the dsh web straight
     // from this machine when it can reach it, and falls back to the relay.
     "lan-port": { type: "string", default: "13080" },
+    // Full dsh web URL incl. the auth token the shell parsed from dsh's
+    // stdout (e.g. http://127.0.0.1:3080/?token=…). Newer dsh builds protect
+    // `/` and `/api/*` with a session cookie issued on the tokened URL; the
+    // bridge logs in once with it and attaches the cookie to every request.
+    // Falls back to --dsh-host/--dsh-port (older dsh, no auth) when absent.
+    "dsh-url": { type: "string", default: "" },
   },
 });
 const RELAY = (() => {
@@ -51,7 +57,73 @@ const RELAY = (() => {
   else if (!r.startsWith("ws://") && !r.startsWith("wss://")) r = "wss://" + r;
   return r;
 })();
-const DSH_BASE = `http://${args.values["dsh-host"]}:${args.values["dsh-port"]}`;
+const DSH_BASE = (() => {
+  if (args.values["dsh-url"]) {
+    try { return new URL(args.values["dsh-url"]).origin; } catch { /* fall through */ }
+  }
+  return `http://${args.values["dsh-host"]}:${args.values["dsh-port"]}`;
+})();
+// The tokened URL itself (`undefined` when the shell passed no --dsh-url, or
+// it carried no token — i.e. an older dsh without auth).
+const DSH_AUTH_URL = (() => {
+  if (!args.values["dsh-url"]) return null;
+  try {
+    const u = new URL(args.values["dsh-url"]);
+    return u.search && u.searchParams.has("token") ? u.href : null;
+  } catch {
+    return null;
+  }
+})();
+// Session cookie obtained by visiting DSH_AUTH_URL once (30-day expiry). All
+// dsh requests go through dshFetch(), which attaches it and re-logins on a
+// 401 (e.g. dsh restarted with a fresh token while the bridge stayed up).
+let dshCookie = null;
+let dshLoginPromise = null;
+
+async function dshLogin() {
+  if (!DSH_AUTH_URL) return;
+  try {
+    // redirect:"manual" — the 303 carries the Set-Cookie we need.
+    const resp = await fetch(DSH_AUTH_URL, { redirect: "manual" });
+    const cookies = typeof resp.headers.getSetCookie === "function"
+      ? resp.headers.getSetCookie()
+      : [resp.headers.get("set-cookie")].filter(Boolean);
+    const merged = cookies
+      .map((c) => c.split(";")[0])
+      .filter(Boolean)
+      .join("; ");
+    if (merged) {
+      dshCookie = merged;
+      emit("dsh-login", { status: resp.status });
+    } else {
+      emit("dsh-login-failed", { status: resp.status, reason: "no set-cookie" });
+    }
+  } catch (err) {
+    emit("dsh-login-failed", { error: String(err?.message || err) });
+  }
+}
+
+function dshLoginOnce() {
+  dshLoginPromise ??= dshLogin().finally(() => { dshLoginPromise = null; });
+  return dshLoginPromise;
+}
+
+/// fetch() against dsh with the auth cookie attached; one automatic re-login
+/// + retry when dsh answers 401 (fresh token after a dsh restart).
+async function dshFetch(url, init = {}) {
+  const headers = { ...(init.headers || {}) };
+  delete headers.cookie;
+  if (dshCookie) headers.cookie = dshCookie;
+  let resp = await fetch(url, { ...init, headers });
+  if (resp.status === 401 && DSH_AUTH_URL) {
+    await dshLoginOnce();
+    if (dshCookie) {
+      headers.cookie = dshCookie;
+      resp = await fetch(url, { ...init, headers });
+    }
+  }
+  return resp;
+}
 const HOST_NAME = args.values["host-name"];
 const DEVICE_ID = args.values["device-id"] || "";
 // Seed the in-memory hostToken from the shell-persisted one, so a restart
@@ -107,13 +179,18 @@ function stripForwardHeaders(headers) {
 }
 
 const lanServer = createServer((req, res) => {
+  const fwdHeaders = stripForwardHeaders(req.headers);
+  // dsh's token auth rejects cookieless requests to `/` and `/api/*`; the
+  // phone has no dsh cookie, so the bridge supplies its own session.
+  delete fwdHeaders.cookie;
+  if (dshCookie) fwdHeaders.cookie = dshCookie;
   const fwd = httpRequest(
     {
       host: "127.0.0.1",
       port: DSH_PORT,
       method: req.method,
       path: req.url,
-      headers: stripForwardHeaders(req.headers),
+      headers: fwdHeaders,
     },
     (fres) => {
       const h = { ...fres.headers };
@@ -144,7 +221,7 @@ lanWss.on("connection", (client, req) => {
     const ctl = new AbortController();
     client.on("close", () => ctl.abort());
     client.on("error", () => ctl.abort());
-    fetch(`${DSH_BASE}${req.url || ""}`, { signal: ctl.signal })
+    dshFetch(`${DSH_BASE}${req.url || ""}`, { signal: ctl.signal })
       .then(async (resp) => {
         if (!resp.ok || !resp.body) {
           try { client.close(1011, "upstream failed"); } catch { /* ignore */ }
@@ -316,7 +393,7 @@ async function handleRpc(frame) {
   const dshRpcId = randomUUID();
   const started = Date.now();
   try {
-    const resp = await fetch(`${DSH_BASE}/api/${method}`, {
+    const resp = await dshFetch(`${DSH_BASE}/api/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "client-request", rpcId: dshRpcId, method, payload: frame.body ?? {} }),
@@ -401,13 +478,23 @@ async function proxyHttp(method, path, headers, bodyBase64) {
     init.body = Buffer.from(bodyBase64, "base64");
   }
   try {
-    const resp = await fetch(`${DSH_BASE}${path}`, init);
+    const resp = await dshFetch(`${DSH_BASE}${path}`, init);
     const buf = Buffer.from(await resp.arrayBuffer());
     const replyHeaders = {};
     const ct = resp.headers.get("content-type");
     if (ct) replyHeaders["content-type"] = ct;
     const loc = resp.headers.get("location");
     if (loc) replyHeaders.location = loc;
+    // Strong ETag over the raw body. dsh's server issues none, so the bridge
+    // is where revalidation happens: the phone re-sends if-none-match on the
+    // mutable entry document and a 304 replaces a ~15KB re-download with one
+    // round trip. (Content-addressed URLs never revalidate at all.)
+    const etag = `"${createHash("sha1").update(buf).digest("hex")}"`;
+    const inm = String(headers["if-none-match"] || "").trim();
+    if (inm && inm === etag) {
+      return { status: 304, headers: { etag }, body: Buffer.alloc(0) };
+    }
+    replyHeaders.etag = etag;
     // The relay downlink (server -> phone) is often bandwidth-starved
     // (e.g. a 1 Mbps egress cap); compress large bodies so the phone's
     // WebView (which decodes content-encoding itself) receives far fewer
@@ -469,7 +556,7 @@ async function handleSseOpen(frame) {
     const ctl = new AbortController();
     sseStreams.set(frame.channel, ctl);
     try {
-      const resp = await fetch(`${DSH_BASE}${frame.path}`, { signal: ctl.signal });
+      const resp = await dshFetch(`${DSH_BASE}${frame.path}`, { signal: ctl.signal });
       if (!resp.ok || !resp.body) {
         send({ v: 1, type: "sse-close", channel: frame.channel, body: { reason: "error" } });
         return;
@@ -497,7 +584,7 @@ async function handleSseOpen(frame) {
   const ctl = new AbortController();
   sseStreams.set(frame.channel, ctl);
   try {
-    const resp = await fetch(`${DSH_BASE}${frame.path}`, { signal: ctl.signal });
+    const resp = await dshFetch(`${DSH_BASE}${frame.path}`, { signal: ctl.signal });
     if (!resp.ok || !resp.body) {
       send({ v: 1, type: "sse-close", channel: frame.channel, body: { reason: "error" } });
       return;
@@ -545,7 +632,7 @@ function handleSseClose(frame) {
 // ---- Respond: POST /api/respond with dsh client-response envelope ----
 async function handleRespond(frame) {
   try {
-    const resp = await fetch(`${DSH_BASE}/api/respond`, {
+    const resp = await dshFetch(`${DSH_BASE}/api/respond`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: "client-response", rpcId: frame.rpcId, result: frame.body ?? { ok: true, value: {} } }),

@@ -66,6 +66,8 @@ const UINT kWM_OverlayLog = WM_APP + 12;
 
 const UINT_PTR kSpinnerTimer = 1;
 const UINT_PTR kRegisterTimerId = 2;
+// Polls for dsh's tokened URL for a short grace period before navigating.
+const UINT_PTR kAuthGraceTimerId = 4;
 const int kDownloadBarHeight = 48;
 const UINT_PTR kIDM_PluginsMarket = 40001;
 const UINT_PTR kIDM_PluginsManager = 40012;
@@ -667,6 +669,13 @@ void MainWindow::OnTimer(WPARAM wParam) {
     if (overlayHwnd_ && IsWindowVisible(overlayHwnd_)) {
         InvalidateRect(overlayHwnd_, nullptr, FALSE);
     }
+    if (wParam == kAuthGraceTimerId) {
+        if (!ServerManager::AuthUrl().empty() || ++authGraceTicks_ > 20) {
+            KillTimer(hwnd_, kAuthGraceTimerId);
+            NavigateToDsh();
+        }
+        return;
+    }
     if (wParam == kRegisterTimerId && !registered_) {
         // Relay unreachable: stop the bridge and tell the user.
         KillTimer(hwnd_, kRegisterTimerId);
@@ -1191,9 +1200,22 @@ void MainWindow::OnShowDownloadBar() { ShowDownloadBar(); }
 void MainWindow::OnHideDownloadBar() { HideDownloadBar(); }
 
 void MainWindow::OnServerReady() {
-    if (g_core) {
-        g_core->Navigate(ServerManager::Url().c_str());
+    // The port can accept a few instants before dsh prints its tokened URL;
+    // poll briefly so the webview loads the authenticated URL instead of a
+    // 401 (older dsh builds never print one — navigate right away then).
+    if (ServerManager::AuthUrl().empty() && ServerManager::SpawnedChild()) {
+        authGraceTicks_ = 0;
+        SetTimer(hwnd_, kAuthGraceTimerId, 250, nullptr);
+        return;
     }
+    NavigateToDsh();
+}
+
+void MainWindow::NavigateToDsh() {
+    if (!g_core) return;
+    std::wstring url = ServerManager::AuthUrl();
+    if (url.empty()) url = ServerManager::Url();
+    g_core->Navigate(url.c_str());
 }
 
 void MainWindow::OnServerFailed() {
@@ -1741,6 +1763,11 @@ void MainWindow::StartBridge(const std::wstring& relay, const std::string& devic
                        L" --dsh-port " + std::to_wstring(ServerManager::Port()) +
                        L" --device-id " + Utf8ToWide(deviceId) +
                        L" --pin " + StablePairingPin();
+    // dsh's tokened web URL (parsed from its stdout); lets the bridge log in
+    // to token-authenticated dsh builds.
+    if (!ServerManager::AuthUrl().empty()) {
+        cmd += L" --dsh-url " + ServerManager::AuthUrl();
+    }
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;

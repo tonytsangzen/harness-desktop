@@ -36,7 +36,15 @@ for (let off = 0; off + 900 < hexOf.length; off += 1024) {
   lines.push(`const mod = "${hexOf.slice(off, off + 900)}";`);
 }
 const big = Buffer.from(lines.join("\n")).toString("base64");
+const entryHtml = Buffer.from(
+  "<!doctype html><html><head><title>dsh</title></head><body><div id=app></div></body></html>"
+).toString("base64");
 const dsh = createServer((req, res) => {
+  if (req.url === "/") {
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    res.end(Buffer.from(entryHtml, "base64"));
+    return;
+  }
   res.writeHead(200, { "content-type": "text/javascript" });
   res.end(Buffer.from(big, "base64"));
 });
@@ -103,6 +111,45 @@ const wire = Buffer.from(parts.map((f) => f.body.body).join(""), "base64");
 ok(parts[0].body.headers["content-encoding"] === "gzip", "gzip content-encoding preserved");
 const orig = (await import("node:zlib")).gunzipSync(wire);
 ok(orig.equals(Buffer.from(big, "base64")), `gunzipped ${orig.length} bytes identical to original`);
+
+// --- ETag / 304 revalidation on the entry document ---
+const httpGet = (id, path, extraHeaders = {}) => {
+  dev.send(JSON.stringify({
+    v: 1, type: "http", id, channel: `ch_${id}`, method: "GET", path,
+    body: { headers: extraHeaders },
+  }));
+};
+const waitFor = async (id) => {
+  for (let i = 0; i < 200; i++) {
+    await sleep(50);
+    const got = frames.filter((f) => f.type === "http-reply" && f.id === id);
+    if (got.length > 0 && got.length >= (got[0].body?.part?.total ?? 1)) return got;
+  }
+  return frames.filter((f) => f.type === "http-reply" && f.id === id);
+};
+
+httpGet("doc1", "/");
+const first = await waitFor("doc1");
+if (first.length !== 1) {
+  console.error("DEBUG doc1 frames:", JSON.stringify(first));
+  console.error("DEBUG all ids seen:", JSON.stringify([...new Set(frames.map((f) => f.id))]));
+  fail(`entry doc got ${first.length} frames`);
+}
+ok(first.length === 1, "entry doc arrives as a single frame");
+ok(first[0].status === 200, "entry doc 200");
+const etag = first[0].body.headers.etag;
+ok(typeof etag === "string" && /^"[0-9a-f]{40}"$/.test(etag), `bridge issues a strong etag (${etag})`);
+ok(Buffer.from(first[0].body.body, "base64").toString().includes("<!doctype html>"), "entry doc body intact");
+
+httpGet("doc2", "/", { "if-none-match": etag });
+const second = await waitFor("doc2");
+ok(second.length === 1 && second[0].status === 304, "matching if-none-match -> 304");
+ok((second[0].body.body || "") === "", "304 carries no body");
+ok(second[0].body.headers.etag === etag, "304 echoes the etag");
+
+httpGet("doc3", "/", { "if-none-match": '"deadbeef"' });
+const third = await waitFor("doc3");
+ok(third[0].status === 200, "stale if-none-match -> full 200 again");
 
 bridge.kill();
 relay.kill();

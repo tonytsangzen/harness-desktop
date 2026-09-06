@@ -190,8 +190,9 @@ Host 与 Device 的 WSS 均为**双向 JSON 文本帧**：
 - `body.headers` = 请求头（Host 头不转发）；`body.body` = 请求体 **base64**（二进制安全）。
 
 **`http-reply`**（Host→Relay→Device）
-- `id` 回显请求；`status` = 上游状态码；`body.headers` = 响应头（content-type、location）；`body.body` = 响应体 **base64**。
+- `id` 回显请求；`status` = 上游状态码；`body.headers` = 响应头（content-type、location、etag）；`body.body` = 响应体 **base64**。
 - **大响应分片**：超过 ~192 KiB 的响应由 bridge 拆成多条 `http-reply` 帧发送，`body.part = {index, total}`（index 从 0 起）；`headers` 只随 part 0 携带，各帧 `status` 相同。Device 按 id 重组，收齐 `total` 片后合并 body。分片发送配合 Device 侧的**空闲超时**（见 §4）：只要分片持续到达，传输就不会被总时长上限掐断。
+- **ETag / 304（bridge 实现）**：dsh 的 web 服务器本身不发 ETag，由 bridge 对响应体原文计算强 ETag（`"<sha1hex>"`）随 200 回复携带；请求头带 `if-none-match` 且与当前实体一致时，bridge 回 `status=304` + 空 body。Device 对可变资源（入口 HTML `/`）持久化「原文 + ETag」，重连时用一次往返确认未变更，避免重复下载。
 - **中途失败**：`body.abort = true`（status=502），Device 立即以 502 结束该请求。
 - 代理失败（小响应）：单帧 `status=502`，body 为错误文本。
 

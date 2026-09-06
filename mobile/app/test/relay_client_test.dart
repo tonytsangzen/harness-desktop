@@ -52,8 +52,8 @@ void main() {
 
     final future = c.rpc('session.list', const {});
     await Future<void>.delayed(const Duration(milliseconds: 20));
-    final sent = ch.sent.first;
-    expect(sent['type'], 'rpc');
+    // connect() emits one tunnel-confirming ping first; the rpc follows.
+    final sent = ch.sent.firstWhere((f) => f['type'] == 'rpc');
     expect(sent['path'], '/api/session.list');
     expect(sent['body'], const {});
 
@@ -74,7 +74,8 @@ void main() {
     final future = c.rpc('session.list');
     await Future<void>.delayed(const Duration(milliseconds: 20));
     ch.server({
-      'v': 1, 'type': 'rpc-reply', 'rpcId': ch.sent.first['rpcId'],
+      'v': 1, 'type': 'rpc-reply',
+      'rpcId': ch.sent.firstWhere((f) => f['type'] == 'rpc')['rpcId'],
       'body': {'ok': false, 'error': {'code': 'host-offline'}},
     });
     await expectLater(future, throwsA(isA<RelayError>()));
@@ -89,6 +90,13 @@ void main() {
     expect(ch.sent.any((f) => f['type'] == 'pong'), isTrue);
   });
 
+  test('connect sends a tunnel-confirming ping', () async {
+    final ch = FakeChannel();
+    final c = makeClient(ch);
+    await c.connect();
+    expect(ch.sent.first['type'], 'ping');
+  });
+
   test('sse-open dispatches frames and responds', () async {
     final ch = FakeChannel();
     final c = makeClient(ch);
@@ -97,8 +105,8 @@ void main() {
     final frames = <SseFrame>[];
     final chId = c.openSse('/api/events.mux', onFrame: frames.add);
     await Future<void>.delayed(const Duration(milliseconds: 20));
-    expect(ch.sent.first['type'], 'sse-open');
-    expect(ch.sent.first['channel'], chId);
+    final open = ch.sent.firstWhere((f) => f['type'] == 'sse-open');
+    expect(open['channel'], chId);
 
     ch.server({
       'v': 1, 'type': 'sse-frame', 'channel': chId,

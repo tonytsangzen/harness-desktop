@@ -77,6 +77,8 @@ private:
     void StartServerAndPoll();
     static gboolean OnPollServer(gpointer userData);
     void OnServerReady();
+    void NavigateToDsh();
+    static gint NavigateGraceTick(gpointer data);
     void OnServerFailed();
     // Stops and restarts the dsh web server (plugin layer changes only apply
     // after a restart); re-polls until the port is ready again.
@@ -85,6 +87,7 @@ private:
     // updating the last-line label. Returns true when anything new arrived
     // (the caller then resets the startup timeout countdown).
     bool DrainServerLogs();
+    std::string authUrl_;           // dsh's tokened web URL from its stdout
     std::streamoff logPos_ = 0;     // stdout log read offset
     std::streamoff logErrPos_ = 0;  // stderr log read offset
     std::string logPending_;        // stdout unterminated tail

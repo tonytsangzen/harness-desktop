@@ -137,6 +137,8 @@ private:
     void OnHideDownloadBar();
     void OnDownloadFailed(const std::wstring* message);
     void OnServerReady();
+    void NavigateToDsh();
+    int authGraceTicks_ = 0;
     void OnServerFailed();
     void OnUpdateAvailable(const std::wstring* version);
     void OnUpdateFinished(bool ok);

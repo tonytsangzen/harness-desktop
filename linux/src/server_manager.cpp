@@ -76,7 +76,8 @@ bool LooksLikeDshWeb(const std::string& host, unsigned short port) {
         guint status = soup_message_get_status(msg);
         SoupMessageHeaders* hdrs = soup_message_get_response_headers(msg);
         const char* ctype = hdrs ? soup_message_headers_get_content_type(hdrs, nullptr) : nullptr;
-        ok = status == 200 && ctype && g_strrstr(ctype, "text/html") != nullptr;
+        // 401 counts too: newer dsh answers unauthenticated `/` with 401.
+        ok = (status == 200 && ctype && g_strrstr(ctype, "text/html") != nullptr) || status == 401;
     }
     if (stream) g_object_unref(stream);
     if (error) g_error_free(error);
@@ -103,6 +104,10 @@ unsigned short ResolvePort(const Settings& settings) {
 }
 
 unsigned short ActivePort() { return g_activePort; }
+
+// True when this launch spawned the dsh child (vs reusing an instance the
+// user started themselves) — only then do we see its stdout/token URL.
+bool SpawnedChild() { return g_childPid != 0; }
 
 std::string LogPath() {
     std::string base = GetEnv("XDG_CACHE_HOME");

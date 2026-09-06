@@ -290,8 +290,22 @@ final class ServerManager {
     /// The port actually used this launch (may differ from `settings.port` if
     /// that port was taken, in which case a free port was chosen automatically).
     private(set) var activePort: UInt16
+
+    // The tokened web URL dsh prints on startup (`dsh web: http://…/?token=…`).
+    // Newer dsh builds gate `/` and `/api/*` behind a session cookie that is
+    // only granted on that URL — loading the plain `/` answers 401 and the
+    // window stays blank. Nil for older dsh builds (or a reused instance we
+    // didn't spawn, whose stdout we don't see).
+    private let authLock = NSLock()
+    private var _authURL: URL?
+    var authURL: URL? {
+        authLock.lock()
+        defer { authLock.unlock() }
+        return _authURL
+    }
+
     /// The URL the webview should load for this launch.
-    var activeURL: URL { URL(string: "http://\(settings.host):\(activePort)/")! }
+    var activeURL: URL { authURL ?? URL(string: "http://\(settings.host):\(activePort)/")! }
 
     /// Called with each chunk of the child's stdout/stderr. The startup screen
     /// uses it to show the latest log line and to reset the readiness timeout.
@@ -379,6 +393,7 @@ final class ServerManager {
             if let text = String(data: handle.availableData, encoding: .utf8), !text.isEmpty {
                 FileHandle.standardOutput.write(Data(text.utf8))
                 self?.markActivity()
+                self?.ingestLog(text)
                 self?.onLog?(text)
             }
         }
@@ -386,6 +401,7 @@ final class ServerManager {
             if let text = String(data: handle.availableData, encoding: .utf8), !text.isEmpty {
                 FileHandle.standardError.write(Data(text.utf8))
                 self?.markActivity()
+                self?.ingestLog(text)
                 self?.onLog?(text)
             }
         }
@@ -409,7 +425,46 @@ final class ServerManager {
     /// (e.g. npx installing the dsh package) isn't killed by the timeout.
     func waitUntilReady(timeout: TimeInterval, completion: @escaping () -> Void, failure: @escaping () -> Void) {
         markActivity()
-        probe(timeout: timeout, completion: completion, failure: failure)
+        probe(timeout: timeout, completion: { [weak self] in
+            // The port can accept a few instants before dsh prints its tokened
+            // URL; give that line a short grace period so the webview loads
+            // the authenticated URL instead of a 401.
+            guard let self = self, self.process != nil else {
+                completion()
+                return
+            }
+            self.waitForAuthURL(grace: 5, completion: completion)
+        }, failure: failure)
+    }
+
+    /// Polls until the auth URL shows up in the server output (or the grace
+    /// period ends — older dsh builds never print one). Runs on the main run
+    /// loop, where the probe already lives.
+    private func waitForAuthURL(grace: TimeInterval, completion: @escaping () -> Void) {
+        let deadline = Date().addingTimeInterval(grace)
+        let timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] t in
+            guard let self = self else {
+                t.invalidate()
+                return
+            }
+            if self.authURL != nil || Date() >= deadline {
+                t.invalidate()
+                completion()
+            }
+        }
+        _ = timer // (already scheduled on the current run loop)
+    }
+
+    /// Extracts `dsh web: <url>` from the server's output, if present.
+    func ingestLog(_ text: String) {
+        guard let lineRange = text.range(of: "dsh web: ") else { return }
+        let rest = text[lineRange.upperBound...]
+        let candidate = rest.split(whereSeparator: \.isWhitespace).first
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        guard candidate.hasPrefix("http"), let url = URL(string: candidate) else { return }
+        authLock.lock()
+        _authURL = url
+        authLock.unlock()
     }
 
     private func probe(timeout: TimeInterval, completion: @escaping () -> Void, failure: @escaping () -> Void) {
@@ -475,11 +530,15 @@ final class ServerManager {
         let semaphore = DispatchSemaphore(value: 0)
         var ok = false
         URLSession.shared.dataTask(with: request) { _, resp, _ in
-            if let http = resp as? HTTPURLResponse,
-               http.statusCode == 200,
-               let type = http.allHeaderFields["Content-Type"] as? String,
-               type.contains("text/html") {
-                ok = true
+            if let http = resp as? HTTPURLResponse {
+                // 401 counts too: newer dsh answers unauthenticated `/` with 401.
+                if http.statusCode == 401 {
+                    ok = true
+                } else if http.statusCode == 200,
+                          let type = http.allHeaderFields["Content-Type"] as? String,
+                          type.contains("text/html") {
+                    ok = true
+                }
             }
             semaphore.signal()
         }.resume()
@@ -624,6 +683,8 @@ final class MobileRemoteManager {
     let relayURL: String
     let deviceID: String
     let dshPort: UInt16
+    /// Tokened dsh web URL (see ServerManager.authURL); nil for older dsh.
+    let dshURL: String?
 
     private var process: Process?
     private var stdoutBuffer = Data()
@@ -641,12 +702,14 @@ final class MobileRemoteManager {
     /// while the Remote Connect toggle is on.
     var autoRestart = false
 
-    init(nodePath: String, bridgePath: URL, relayURL: String, deviceID: String, dshPort: UInt16) {
+    init(nodePath: String, bridgePath: URL, relayURL: String, deviceID: String, dshPort: UInt16,
+         dshURL: String? = nil) {
         self.nodePath = nodePath
         self.bridgePath = bridgePath
         self.relayURL = relayURL
         self.deviceID = deviceID
         self.dshPort = dshPort
+        self.dshURL = dshURL
     }
 
     func start() {
@@ -660,6 +723,9 @@ final class MobileRemoteManager {
         let p = Process()
         var args = [bridgePath.path, "--relay", relayURL, "--dsh-port", "\(dshPort)",
                     "--device-id", deviceID, "--pin", StablePairingPin()]
+        if let dshURL = dshURL {
+            args += ["--dsh-url", dshURL]
+        }
         // Persisted hostToken lets a bridge restart reconnect by token instead
         // of re-registering — the relay refuses anonymous re-registration of an
         // existing hostId (hijack protection).
@@ -2422,7 +2488,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
 
         let m = MobileRemoteManager(nodePath: node, bridgePath: bridge,
                                     relayURL: relay, deviceID: deviceID,
-                                    dshPort: server.activePort)
+                                    dshPort: server.activePort,
+                                    dshURL: server.authURL?.absoluteString)
         // While the toggle is on, an unexpected bridge exit re-spawns and
         // re-registers with the relay automatically.
         m.autoRestart = true
@@ -2690,6 +2757,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         pendingLogTail += text
         if pendingLogTail.count > 8192 {
             pendingLogTail = String(pendingLogTail.suffix(4096))
+        }
+        // Parse the tokened URL from COMPLETE lines — the raw pipe chunks
+        // ServerManager.ingestLog sees may split the line mid-way.
+        for line in pendingLogTail.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            server.ingestLog(line + "\n")
         }
         let lastSegment = pendingLogTail
             .split(whereSeparator: { $0 == "\n" || $0 == "\r" })

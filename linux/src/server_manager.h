@@ -36,6 +36,7 @@ bool TcpProbe(const std::string& host, unsigned short port, int timeoutMs);
 unsigned short ResolvePort(const Settings& settings);
 
 unsigned short ActivePort();
+bool SpawnedChild();
 
 // Path of the server log file.
 std::string LogPath();

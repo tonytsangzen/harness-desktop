@@ -47,6 +47,10 @@ void SetLogHandler(const std::function<void(const std::wstring&)>& handler);
 unsigned short Port();
 std::wstring Host();
 std::wstring Url();
+// The tokened web URL dsh printed on startup (empty for older dsh builds).
+std::wstring AuthUrl();
+// True when this launch spawned the dsh child (vs reusing an existing one).
+bool SpawnedChild();
 
 // True when host:port already serves a web page (an existing dsh instance
 // worth reusing instead of spawning a second, empty one).

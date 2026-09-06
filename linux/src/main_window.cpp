@@ -708,7 +708,14 @@ bool MainWindow::DrainServerLogs() {
             std::string line = pending.substr(0, nl);
             pending.erase(0, nl + 1);
             if (!line.empty() && line.back() == '\r') line.pop_back();
-            if (!line.empty()) last = line;
+            if (!line.empty()) {
+                // dsh prints its (possibly token-bearing) web URL on startup:
+                // `dsh web: http://127.0.0.1:3080/?token=…`. Newer dsh builds
+                // gate `/` and `/api/*` behind a session cookie granted on
+                // that URL — the plain `/` would answer 401 (blank window).
+                if (line.rfind("dsh web: ", 0) == 0) authUrl_ = line.substr(9);
+                last = line;
+            }
         }
     };
     drain(ServerManager::LogPath(), logPos_, logPending_);
@@ -738,14 +745,50 @@ bool MainWindow::DrainServerLogs() {
 
 void MainWindow::OnServerReady() {
     serverReady_ = true;
-    std::string url = "http://" + settings_->host + ":" +
-                      std::to_string(ServerManager::ActivePort()) + "/";
-    webkit_web_view_load_uri(WEBKIT_WEB_VIEW(webview_), url.c_str());
+    NavigateToDshWithAuth();
     // Version check runs once per session, off the main thread.
     if (!updateChecked_) {
         updateChecked_ = true;
         g_thread_unref(g_thread_new("update-check", CheckForUpdatesThread, this));
     }
+}
+
+namespace {
+
+struct NavigateGraceCtx {
+    MainWindow* self;
+    int tries;
+};
+
+} // namespace
+
+// Navigates once dsh's tokened URL (if any) has shown up in its output, or
+// after a short grace period when the running dsh never prints one (older
+// builds, or a reused instance we didn't spawn).
+void MainWindow::NavigateToDshWithAuth() {
+    if (authUrl_.empty() && ServerManager::SpawnedChild()) {
+        auto* ctx = new NavigateGraceCtx{this, 0};
+        g_timeout_add(250, &MainWindow::NavigateGraceTick, ctx);
+        return;
+    }
+    NavigateToDsh();
+}
+
+gint MainWindow::NavigateGraceTick(gpointer data) {
+    auto* ctx = static_cast<NavigateGraceCtx*>(data);
+    if (!ctx->self->authUrl_.empty() || ++ctx->tries > 20) {
+        ctx->self->NavigateToDsh();
+        delete ctx;
+        return G_SOURCE_REMOVE;
+    }
+    return G_SOURCE_CONTINUE;
+}
+
+void MainWindow::NavigateToDsh() {
+    std::string url = authUrl_.empty()
+        ? "http://" + settings_->host + ":" + std::to_string(ServerManager::ActivePort()) + "/"
+        : authUrl_;
+    webkit_web_view_load_uri(WEBKIT_WEB_VIEW(webview_), url.c_str());
 }
 
 void MainWindow::OnServerFailed() {
@@ -1388,6 +1431,9 @@ void MainWindow::StartMobileBridge(const std::string& relay, const std::string& 
 
     std::string portStr = std::to_string(settings_->port);
     std::string pin = StablePairingPin();
+    // dsh's tokened web URL (parsed from its stdout); lets the bridge log in
+    // to token-authenticated dsh builds. NULL for older dsh (no auth).
+    const gchar* dshUrlArg = authUrl_.empty() ? nullptr : authUrl_.c_str();
     gchar* argv[] = { const_cast<gchar*>(node.c_str()),
                       const_cast<gchar*>(bridge.c_str()),
                       const_cast<gchar*>("--relay"),
@@ -1398,6 +1444,8 @@ void MainWindow::StartMobileBridge(const std::string& relay, const std::string& 
                       const_cast<gchar*>(deviceId.c_str()),
                       const_cast<gchar*>("--pin"),
                       const_cast<gchar*>(pin.c_str()),
+                      const_cast<gchar*>("--dsh-url"),
+                      const_cast<gchar*>(dshUrlArg ? dshUrlArg : ""),
                       nullptr };
     gint stdoutFd = -1;
     GError* err = nullptr;

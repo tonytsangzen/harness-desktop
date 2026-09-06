@@ -12,13 +12,21 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'disk_cache.dart';
 import 'tunnel_backend.dart';
 
+/// One tunneled HTTP response (record shape shared with [TunnelBackend.http]).
+typedef _TunnelResponse = ({int status, Map<String, String> headers, String bodyB64});
+
 class WebProxy {
-  WebProxy(this.client);
+  /// [disk] overrides the shared [DiskCache] (tests); null resolves the
+  /// real one in [start]. Disk failures degrade to the in-memory cache.
+  WebProxy(this.client, {DiskCache? disk}) : _diskOverride = disk;
 
   /// Active backend (relay tunnel or LAN-direct).
   final TunnelBackend client;
+  final DiskCache? _diskOverride;
+  DiskCache? _disk;
 
   HttpServer? _server;
   final Map<String, WebSocket> _wsByChannel = {};
@@ -37,6 +45,10 @@ class WebProxy {
 
   /// Open raw mux channels streaming HTTP SSE into WebView responses.
   final Set<String> _sseChannels = {};
+
+  /// In-flight tunnel GETs by URL: parallel identical requests (a page load
+  /// fires many) share one tunnel round trip instead of racing the queue.
+  final Map<String, Future<_TunnelResponse>> _inflight = {};
 
   int get port => _server?.port ?? 0;
 
@@ -59,6 +71,13 @@ class WebProxy {
       _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     }
     _server!.listen(_handle, onError: (Object e) {});
+    if (_disk == null) {
+      try {
+        _disk = _diskOverride ?? await DiskCache.instance();
+      } catch (_) {
+        _disk = null; // no storage: in-memory cache still works
+      }
+    }
   }
 
   Future<void> close() async {
@@ -70,6 +89,7 @@ class WebProxy {
       client.closeSse(ch);
     }
     _sseChannels.clear();
+    _inflight.clear();
     _cache.clear();
     _cacheBytes = 0;
     await _server?.close(force: true);
@@ -85,13 +105,29 @@ class WebProxy {
       return;
     }
     // /plugins/events is an HTTP SSE stream that never ends. Tunneled as a
-    // plain HTTP request it stalls until the 30s relay timeout (one long
+    // plain HTTP request it stalls until the relay timeout (one long
     // stall on every connect). Stream it through a raw mux channel instead.
     if (path == '/plugins/events') {
       _handleSseStream(req);
       return;
     }
     try {
+      await _handleHttp(req);
+    } catch (e) {
+      print('[dsh] proxy error: $e');
+      req.response.statusCode = 502;
+      req.response.headers.contentType = ContentType.text;
+      req.response.write('proxy error: $e');
+    }
+    // Terminate EVERY plain HTTP response — including the cache-hit early
+    // returns inside _handleHttp. Without close() the keep-alive connection
+    // never completes and the WebView request hangs forever.
+    await req.response.close();
+  }
+
+  Future<void> _handleHttp(HttpRequest req) async {
+    final path = req.uri.path;
+    {
       final fullPath = req.uri.query.isEmpty
           ? path
           : '$path?${req.uri.query}';
@@ -100,6 +136,14 @@ class WebProxy {
         final hit = _cache[fullPath];
         if (hit != null) {
           _serveCached(req, hit);
+          return;
+        }
+        // Persistent layer: URLs here carry their content hash, so a hit
+        // needs no revalidation — zero tunnel traffic for unchanged files.
+        final entry = await _disk?.get(fullPath);
+        if (entry != null && entry.body.isNotEmpty) {
+          _store(fullPath, entry.status, entry.headers, entry.body);
+          _serveCached(req, _CachedResponse(entry.status, entry.headers, entry.body));
           return;
         }
       }
@@ -115,28 +159,47 @@ class WebProxy {
         if (l == 'host' || l == 'origin') return;
         headers[name] = values.join(',');
       });
-      ({int status, Map<String, String> headers, String bodyB64}) r;
-      try {
-        r = await client.http(
-          req.method,
-          fullPath,
-          headers: headers,
-          body: bodyBytes,
-        );
-      } on Object {
-        // A timed-out idempotent request is very likely a transient relay
-        // hiccup (stalled chunk, tunnel blip). Without a retry the page shows
-        // "Failed to load plugins"; one retry on GET/HEAD recovers silently.
-        if (req.method != 'GET' && req.method != 'HEAD') rethrow;
-        r = await client.http(
-          req.method,
-          fullPath,
-          headers: headers,
-          body: bodyBytes,
-        );
+      // The entry document ("/") is mutable (no content hash), so it carries
+      // a bridge-issued ETag: re-send If-None-Match and a 304 replaces a
+      // ~15KB download with a round trip.
+      final isEntryDoc = req.method == 'GET' && path == '/';
+      DiskCacheEntry? doc;
+      if (isEntryDoc && _disk != null) {
+        doc = await _disk!.get(path);
+        // Only revalidate when we truly hold the body — a 304 without a
+        // stored document would leave the WebView without an answer.
+        if (doc != null && doc.body.isNotEmpty && doc.etag != null) {
+          headers['if-none-match'] = doc.etag!;
+        } else {
+          doc = null;
+        }
+      }
+      var r = await _tunnel(req.method, fullPath, headers, bodyBytes);
+      if (r.status == 304 && doc != null && doc.body.isNotEmpty) {
+        // Tunnel-level "unchanged": answer the WebView from disk.
+        r = (status: 200, headers: doc.headers, bodyB64: base64Encode(doc.body));
       }
       var respBody = r.bodyB64.isNotEmpty ? base64Decode(r.bodyB64) : const <int>[];
-      var respHeaders = r.headers;
+      var respHeaders = Map<String, String>.from(r.headers);
+      // The bridge gzips large bodies for the relay downlink; localhost
+      // serving gains nothing from it, and both the polyfill injection and
+      // the disk cache operate on plain bytes. (Before this normalization
+      // the gzip layer silently disabled polyfill injection for >2KB docs.)
+      final encoding = respHeaders['content-encoding']?.toLowerCase();
+      if (encoding == 'gzip' && respBody.isNotEmpty) {
+        try {
+          respBody = GZipCodec().decode(respBody);
+          respHeaders
+            ..remove('content-encoding')
+            ..remove('Content-Encoding')
+            ..remove('content-length')
+            ..remove('Content-Length');
+        } catch (_) {
+          // Not actually gzip (or corrupt): serve as-is.
+        }
+      }
+      // Raw (pre-injection) bytes: what the entry-document record persists.
+      final rawPlain = List<int>.of(respBody);
       // Inject the AbortSignal polyfill into the HTML entry document (only
       // when it is uncompressed text/html). Old Android system WebViews
       // (pre-Chrome 116) lack AbortSignal.any/timeout, which the dsh UI calls
@@ -147,7 +210,7 @@ class WebProxy {
         final injected = _injectAbortSignalPolyfill(respBody);
         if (injected != null) {
           respBody = injected;
-          respHeaders = Map<String, String>.from(r.headers)
+          respHeaders
             ..remove('content-length')
             ..remove('Content-Length')
             // Never let the WebView cache an injected document: a stale
@@ -163,16 +226,51 @@ class WebProxy {
         }
       }
       if (cacheable && r.status == 200) {
-        _store(fullPath, r.status, r.headers, respBody);
+        _store(fullPath, r.status, respHeaders, respBody);
+        // Persist content-addressed resources so the NEXT connection (and
+        // app restart) serves them from disk without any tunnel round trip.
+        _disk?.put(fullPath,
+            status: r.status, headers: respHeaders, body: respBody);
+      }
+      if (isEntryDoc && r.status == 200 && _disk != null) {
+        // Store the RAW (pre-injection) document + its ETag; the injected
+        // variant is derived at serve time, so the stored bytes stay valid
+        // across app updates.
+        _disk?.put(path,
+            status: r.status,
+            headers: Map.of(respHeaders)..['cache-control'] = 'no-store',
+            body: rawPlain,
+            etag: r.headers['etag'] ?? r.headers['ETag']);
       }
       _serveCached(req, _CachedResponse(r.status, respHeaders, respBody));
-    } catch (e) {
-      print('[dsh] proxy error: $e');
-      req.response.statusCode = 502;
-      req.response.headers.contentType = ContentType.text;
-      req.response.write('proxy error: $e');
     }
-    await req.response.close();
+  }
+
+  /// One tunneled request with in-flight coalescing and one automatic retry
+  /// for idempotent methods (a timed-out GET is very likely a transient relay
+  /// hiccup; without the retry the page shows "Failed to load plugins").
+  /// The retry lives inside the shared future: when N parallel requests
+  /// coalesce onto one tunnel call, one retry recovers all of them.
+  Future<_TunnelResponse> _tunnel(
+      String method, String fullPath, Map<String, String> headers, List<int> body) {
+    if (method != 'GET' && method != 'HEAD') {
+      return client.http(method, fullPath, headers: headers, body: body);
+    }
+    final existing = _inflight[fullPath];
+    if (existing != null) return existing;
+    final f = _issueWithRetry(method, fullPath, headers, body);
+    _inflight[fullPath] = f;
+    return f.whenComplete(() => _inflight.remove(fullPath));
+  }
+
+  Future<_TunnelResponse> _issueWithRetry(String method, String fullPath,
+      Map<String, String> headers, List<int> body) async {
+    try {
+      return await client.http(method, fullPath, headers: headers, body: body);
+    } on Object {
+      // A second failure propagates to every waiter.
+      return client.http(method, fullPath, headers: headers, body: body);
+    }
   }
 
   void _store(String key, int status, Map<String, String> headers, List<int> body) {

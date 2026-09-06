@@ -30,6 +30,10 @@ bool g_reusing = false;
 
 // Called with each complete log line the child writes (see SetLogHandler).
 std::function<void(const std::wstring&)> g_onLog;
+// dsh's tokened web URL, parsed from its stdout (`dsh web: <url>`). Newer
+// dsh builds gate `/` and `/api/*` behind a session cookie granted on that
+// URL — the plain `/` answers 401 (blank window).
+std::wstring g_authUrl;
 
 // UTF-8 (Node console output) → UTF-16 for the UI.
 std::wstring Utf8ToWide(const std::string& s) {
@@ -303,7 +307,8 @@ bool LooksLikeDshWeb(const std::wstring& host, unsigned short port) {
         if (WinHttpQueryHeaders(req,
                                 WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                                 WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusLen, nullptr) &&
-            status == 200) {
+            // 401 counts too: newer dsh answers unauthenticated `/` with 401.
+            status == 200 || status == 401) {
             wchar_t ctype[128] = {};
             DWORD ctypeLen = sizeof(ctype);
             if (WinHttpQueryHeaders(req, WINHTTP_QUERY_CONTENT_TYPE,
@@ -337,6 +342,10 @@ unsigned short Port() { return g_settings.port; }
 std::wstring Host() { return g_settings.host; }
 std::wstring Url() { return g_settings.Url(); }
 
+std::wstring AuthUrl() { return g_authUrl; }
+
+bool SpawnedChild() { return g_process != nullptr; }
+
 void SetLogHandler(const std::function<void(const std::wstring&)>& handler) {
     g_onLog = handler;
 }
@@ -365,6 +374,7 @@ bool WaitUntilReady(int timeoutMs, const std::function<void()>& onWaiting) {
             if (grew) {
                 deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
                 for (auto& line : lines) {
+                    if (line.rfind(L"dsh web: ", 0) == 0) g_authUrl = line.substr(9);
                     if (g_onLog) g_onLog(line);
                 }
             }
