@@ -11,6 +11,14 @@
 - **实现**：bridge（Node crypto/zlib）、App（`cryptography` 包 + dart:io zlib，含 Node↔Dart 黄金向量互操作单测）、relay `stream-batch` 路由；三端桌面壳生成/持久化 `e2eSecret` 并写入二维码；协议文档 §3/§4 同步。**部署注意：聚合需配套升级 relay**（`stream-batch` 新帧）
 - **dsh token 不再走二维码/App**：dsh 每次重启都轮换启动 token，二维码/手机端存储的 token 注定过期。改为桌面壳把当前 token 传给 bridge（`--dsh-token`，并持久化最近值以覆盖「复用已运行 dsh」场景），bridge 对每条流的第一个 `GET /` 自动注入 `?token=` 完成 cookie 换取——二维码与 App 完全不感知 token，dsh 重启后凭持久化 cookie 自动恢复
 
+### 修复（锁屏后重连卡在「正在重新连接…」）
+
+锁屏后隧道断开，后台重连其实成功了，但 UI 永远不知道：`RelayClient` 只在断开时回调状态，成功连接不回调，而 `_attach` 里 `connected = true` 之后漏了 `notifyListeners()`——重连遮罩永不消失，代理重建（换用新连接）也不触发，页面彻底卡死。
+
+- `_attach` 成功后补发通知：遮罩正常消失，隧道恢复后的代理重建恢复触发
+- 每次 `_attach` 先关闭上一个 client：修复重连时 WSS 连接泄漏
+- App 切回前台（解锁）时跳过剩余退避（最长 30s）立即重连，退避计数清零
+
 ### 修复（手机端首次连接任务列表不刷新 / dsh 鉴权）
 
 dsh 的浏览器会话 cookie 与请求的 Host authority 逐请求绑定（cookie 名与签名 payload 均含 `sha256(Host)`），而手机端本地代理此前只改写每条 TCP 连接**第一条请求**的 Host——HTTP keep-alive 复用连接上的后续请求（含 303 换 cookie 的重定向）带着代理自身端口到达 dsh，cookie 校验必然失败，WebView 直接显示 `401 dsh web authentication required`。桌面端本地直连 authority 恒定，因此从未复现。
