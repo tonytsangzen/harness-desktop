@@ -212,7 +212,59 @@ for (let i = 0; i < 100 && !host2GotRpc; i++) {
 }
 ok(!!host2GotRpc, "device traffic routes to the takeover connection");
 
-host2.close();
+// --- 9. Anonymous re-register with the fixed PIN (token recovery) ---
+// A client that loses its hostToken (app reinstall) must be able to reclaim
+// its hostId with the fixed PIN — otherwise the host is locked out for the
+// whole GC window. Wrong PIN is still refused.
+const host3 = new WebSocket(`${BASE}/host`);
+await new Promise((res, rej) => { host3.onopen = res; host3.onerror = rej; });
+host3.onmessage = (e) => hostFrames.push(JSON.parse(e.data));
+host3.send(JSON.stringify({
+  v: 1, type: "control", kind: "register",
+  body: { hostId: "1234567890999", hostName: "PinHost", dshVersion: "0.0.0-test", pin: "864209" },
+}));
+let pinHost3;
+for (let i = 0; i < 50 && !pinHost3; i++) {
+  await sleep(50);
+  pinHost3 = hostFrames.find((f) => f.type === "control" && f.kind === "registered");
+}
+ok(!!pinHost3, "fixed-pin host registered");
+const host3Close = new Promise((res) => { host3.onclose = res; });
+
+// Same hostId, correct PIN, no token -> accepted.
+const host4 = new WebSocket(`${BASE}/host`);
+await new Promise((res, rej) => { host4.onopen = res; host4.onerror = rej; });
+host4.onmessage = (e) => hostFrames.push(JSON.parse(e.data));
+host4.send(JSON.stringify({
+  v: 1, type: "control", kind: "register",
+  body: { hostId: "1234567890999", hostName: "PinHost2", dshVersion: "0.0.0-test", pin: "864209" },
+}));
+let host4Reg;
+for (let i = 0; i < 50 && !host4Reg; i++) {
+  await sleep(50);
+  host4Reg = hostFrames.find((f) => f.type === "control" && f.kind === "registered");
+}
+ok(!!host4Reg, "re-register with matching PIN accepted");
+
+// Wrong PIN -> refused.
+const host5 = new WebSocket(`${BASE}/host`);
+await new Promise((res, rej) => { host5.onopen = res; host5.onerror = rej; });
+host5.send(JSON.stringify({
+  v: 1, type: "control", kind: "register",
+  body: { hostId: "1234567890999", hostName: "PinHost3", dshVersion: "0.0.0-test", pin: "918273" },
+}));
+let host5Denied = false;
+host5.onmessage = (e) => {
+  const f = JSON.parse(e.data);
+  if (f.type === "control" && f.kind === "register-denied") host5Denied = true;
+};
+host5.onclose = () => { host5Denied = true; };
+for (let i = 0; i < 50 && !host5Denied; i++) await sleep(50);
+ok(host5Denied, "wrong PIN refused (host-conflict)");
+
+host3.close();
+host4.close();
+host5.close();
 devWs.close();
 console.log("\nE2E PASS");
 process.exit(0);

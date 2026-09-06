@@ -3,6 +3,7 @@
 package store
 
 import (
+	"crypto/subtle"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -97,11 +98,14 @@ func Hash(tok string) string {
 // plaintext hostToken (shown once; only the hash is stored).
 //
 // Security: re-registering an EXISTING hostId requires a valid hostToken
-// (regToken). Without it the request is refused — otherwise anyone who learns
-// a hostId (QR code, logs) could hijack the host, kick the real bridge and
-// intercept all device traffic. A brand-new hostId (first registration) is
-// always allowed; the bridge persists its hostToken so a restart reconnects
-// with the token instead of re-registering anonymously.
+// (regToken) or the host's current fixed PIN. Without one of them the request
+// is refused — otherwise anyone who learns a hostId (QR code, logs) could
+// hijack the host, kick the real bridge and intercept all device traffic. The
+// PIN escape hatch exists because a client can otherwise lose its token with
+// no way back (app reinstall, id-scheme change): knowing the fixed PIN proves
+// the same ownership a successful pair would. A brand-new hostId (first
+// registration) is always allowed; the bridge persists its hostToken so a
+// restart reconnects with the token instead of re-registering anonymously.
 func (s *Store) RegisterHost(id, name, dshVersion, fixedPin, regToken string) (*Host, string, string, int64, bool, string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -112,7 +116,10 @@ func (s *Store) RegisterHost(id, name, dshVersion, fixedPin, regToken string) (*
 
 	host := s.hosts[id]
 	if host != nil {
-		if regToken == "" || !s.tokenMatchesHost(regToken, host) {
+		tokenOK := regToken != "" && s.tokenMatchesHost(regToken, host)
+		pinOK := fixedPin != "" && host.FixedPin != "" &&
+			subtle.ConstantTimeCompare([]byte(fixedPin), []byte(host.FixedPin)) == 1
+		if !tokenOK && !pinOK {
 			return nil, "", "", 0, false, "host-conflict"
 		}
 	} else {
