@@ -232,7 +232,12 @@ class AppState extends ChangeNotifier {
     return (jsonDecode(body) as Map).cast<String, dynamic>();
   }
 
-  Future<void> _attach(SavedConnection conn) async {
+  ///
+  /// `rescheduleOnFailure` keeps the reconnect chain alive when this attach
+  /// runs in the background (timer / app resume): a failed attempt must arm
+  /// the next backoff, otherwise the chain dies and the tunnel never
+  /// reconnects even after the server comes back.
+  Future<void> _attach(SavedConnection conn, {bool rescheduleOnFailure = false}) async {
     _closing = false;
     // Drop the previous tunnel first: reconnects swap in a fresh client and
     // the old WSS socket (zombie after a screen-lock drop) must not leak.
@@ -271,6 +276,8 @@ class AppState extends ChangeNotifier {
       _log('connect error: $e');
       error = '连接失败: $e';
       connected = false;
+      notifyListeners();
+      if (rescheduleOnFailure) _scheduleReconnect(conn);
       // Re-throw so callers (connectTo / pair / repair) can react, e.g. ask
       // for a fresh PIN on RelayError('unauthorized').
       rethrow;
@@ -287,7 +294,7 @@ class AppState extends ChangeNotifier {
     _reconnectAttempt = 0;
     final conn = currentConnection!;
     _log('app resumed: reconnecting now');
-    _attach(conn).catchError((Object e) {
+    _attach(conn, rescheduleOnFailure: true).catchError((Object e) {
       _log('resume reconnect failed: $e');
     });
   }
@@ -326,9 +333,8 @@ class AppState extends ChangeNotifier {
       _reconnectTimer = null;
       if (_closing || gen != _generation) return;
       _log('reconnecting tunnel…');
-      _attach(conn).catchError((Object e) {
+      _attach(conn, rescheduleOnFailure: true).catchError((Object e) {
         _log('reconnect failed: $e');
-        _scheduleReconnect(conn);
       });
     });
   }
