@@ -19,6 +19,13 @@
 - 每次 `_attach` 先关闭上一个 client：修复重连时 WSS 连接泄漏
 - App 切回前台（解锁）时跳过剩余退避（最长 30s）立即重连，退避计数清零
 
+### 修复（服务端断开后永不重连）
+
+解锁/回前台触发的重连若失败（如 Wi-Fi 尚未恢复），重连链条会永久断裂：`resumeReconnect` 取消了退避定时器后自行尝试，失败只记日志、不重新调度——之后服务端恢复也不再重试，页面永远卡在重连遮罩。
+
+- `_attach` 增加 `rescheduleOnFailure`：定时器路径与 resume 路径失败后统一武装下一轮退避（防重入守卫保证不重复调度），用户主动发起的连接仍直接报错
+- 失败同时 `notifyListeners()`，UI 状态一致
+
 ### 修复（手机端首次连接任务列表不刷新 / dsh 鉴权）
 
 dsh 的浏览器会话 cookie 与请求的 Host authority 逐请求绑定（cookie 名与签名 payload 均含 `sha256(Host)`），而手机端本地代理此前只改写每条 TCP 连接**第一条请求**的 Host——HTTP keep-alive 复用连接上的后续请求（含 303 换 cookie 的重定向）带着代理自身端口到达 dsh，cookie 校验必然失败，WebView 直接显示 `401 dsh web authentication required`。桌面端本地直连 authority 恒定，因此从未复现。
