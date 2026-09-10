@@ -1340,7 +1340,7 @@ std::string DshTokenForBridge(const std::string& current) {
 
 std::string PairingQRContent(const std::string& relayUrl, const std::string& deviceId,
                              const std::string& lanAddress, unsigned short dshPort,
-                             const std::string& e2eSecret) {
+                             const std::string& e2eSecret, const std::string& pin) {
     std::string scheme = "https";
     std::string host = relayUrl;
     size_t sep = host.find("://");
@@ -1354,6 +1354,7 @@ std::string PairingQRContent(const std::string& relayUrl, const std::string& dev
                      "&scheme=" + scheme + "&dshPort=" + std::to_string(dshPort);
     if (!lanAddress.empty()) qr += "&lan=" + lanAddress;
     if (!e2eSecret.empty()) qr += "&e2e=" + QueryEncode(e2eSecret);
+    if (!pin.empty()) qr += "&pin=" + pin;
     return qr;
 }
 
@@ -1453,7 +1454,7 @@ void MainWindow::OnMobileRemoteActivate(GtkWidget* /*item*/, gpointer userData) 
     if (!lan.empty()) lan += ":13080";
     std::string qrContent = PairingQRContent(self->mobileRelayUrl_, deviceId, lan,
                                               ServerManager::ActivePort(),
-                                              E2ESecret());
+                                              E2ESecret(), StablePairingPin());
     std::string qrPNG = GenerateQRPNG(qrContent);
     if (qrPNG.empty()) {
         self->ShowError(self->IsChinese() ? "生成配对二维码失败。"

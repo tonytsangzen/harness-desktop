@@ -82,6 +82,8 @@ Content-Type: application/json
 {"deviceId":"0123456789012","pin":"814304"}
 ```
 
+桌面 PIN 是稳定的（首次生成后持久化），因此配对二维码直接携带 `pin=`：手机扫码即完成配对，无需手动输入；App 把该 PIN 随连接持久化，session 过期时用它静默重新配对（PIN 在桌面端被修改过才回退到手动输入）。
+
 成功响应包含 `hostId`、`deviceId`、`sessionToken` 和 `refreshToken`。App 之后连接 Device WSS 时携带：
 
 ```http

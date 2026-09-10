@@ -1690,7 +1690,7 @@ std::string DshTokenFromAuthUrl(const std::wstring& url) {
 
 std::string PairingQRContent(const std::wstring& relayUrl, const std::string& deviceId,
                              const std::string& lanAddress, unsigned short dshPort,
-                             const std::string& e2eSecret) {
+                             const std::string& e2eSecret, const std::string& pin) {
     std::wstring scheme = L"https";
     std::wstring host = relayUrl;
     size_t sep = host.find(L"://");
@@ -1704,6 +1704,7 @@ std::string PairingQRContent(const std::wstring& relayUrl, const std::string& de
                      "&scheme=" + WideToUtf8(scheme) + "&dshPort=" + std::to_string(dshPort);
     if (!lanAddress.empty()) qr += "&lan=" + lanAddress;
     if (!e2eSecret.empty()) qr += "&e2e=" + QueryEncode(e2eSecret);
+    if (!pin.empty()) qr += "&pin=" + pin;
     return qr;
 }
 
@@ -1854,7 +1855,7 @@ void MainWindow::OnMobileRemote() {
     if (!lan.empty()) lan += ":13080";
     qrPNG_ = GenerateQRPNG(PairingQRContent(mobileRelayUrl_, deviceId_, lan,
                                              ServerManager::Port(),
-                                             E2ESecret()));
+                                             E2ESecret(), WideToUtf8(StablePairingPin())));
     if (qrPNG_.empty()) {
         bool zh = IsChinese();
         MessageBoxW(hwnd_, zh ? L"生成配对二维码失败。" : L"Failed to generate the pairing QR code.",

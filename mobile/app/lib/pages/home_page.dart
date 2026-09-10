@@ -65,7 +65,24 @@ class _HomePageState extends State<HomePage> {
     } on RelayError catch (e) {
       if (!mounted) return;
       if (e.code == 'unauthorized') {
-        // Token expired on the relay: ask for the current PIN and re-pair.
+        // Token expired on the relay: re-pair with the PIN saved from the QR
+        // (desktop PINs are stable), falling back to the dialog only when the
+        // connection predates QR-carried PINs or the saved PIN was rejected.
+        if (conn.pin.length == 6) {
+          try {
+            await widget.state.repairConnection(conn, conn.pin);
+            if (!mounted) return;
+            if (widget.state.connected) {
+              Navigator.of(context).pushReplacementNamed('/remote');
+            } else {
+              setState(() =>
+                  _error = '重新连接失败：${widget.state.error ?? '未知错误'}');
+            }
+            return;
+          } catch (_) {
+            // Saved PIN rejected (changed on the desktop): fall through.
+          }
+        }
         await _repairWithPin(conn);
       } else {
         setState(() => _error = '连接失败：${e.message}');

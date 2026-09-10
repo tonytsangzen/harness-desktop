@@ -965,7 +965,7 @@ private func queryEncode(_ value: String) -> String {
 }
 
 func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?,
-                      dshPort: UInt16, e2eSecret: String?) -> String {
+                      dshPort: UInt16, e2eSecret: String?, pin: String) -> String {
     var host = relayURL
     var scheme = "https"
     if let url = URL(string: relayURL) {
@@ -976,6 +976,7 @@ func PairingQRContent(relayURL: String, deviceID: String, lanAddress: String?,
     var qr = "relay://\(host)/pair?device=\(deviceID)&scheme=\(scheme)&dshPort=\(dshPort)"
     if let lan = lanAddress { qr += "&lan=\(lan)" }
     if !e2eSecret!.isEmpty { qr += "&e2e=\(queryEncode(e2eSecret!))" }
+    qr += "&pin=\(queryEncode(pin))"
     return qr
 }
 
@@ -2546,7 +2547,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         let lan = LocalLANAddress().map { "\($0):13080" }
         let qrContent = PairingQRContent(relayURL: relay, deviceID: deviceID, lanAddress: lan,
                                          dshPort: server.activePort,
-                                         e2eSecret: E2ESecret())
+                                         e2eSecret: E2ESecret(), pin: StablePairingPin())
         guard let qrPNG = GenerateQRPNG(content: qrContent) else {
             setRemoteStatus(s.mobileRemoteFailed, color: .systemRed)
             remoteSwitchRef?.state = .off

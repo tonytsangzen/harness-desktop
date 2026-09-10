@@ -23,6 +23,7 @@ class _PairingPageState extends State<PairingPage> {
   String? _lan; // optional "ip:port" for direct LAN connect (from the QR)
   String? _e2eSecret; // tunnel E2E secret (shared via QR, relay-blind)
   int _dshPort = 3080;
+  String? _qrPin; // PIN carried by the QR: pairing proceeds without typing
 
   Future<void> _submit() async {
     if (_deviceId.isEmpty || _relay.text.isEmpty) {
@@ -49,7 +50,7 @@ class _PairingPageState extends State<PairingPage> {
     }
   }
 
-  void _onDetect(BarcodeCapture capture) {
+  Future<void> _onDetect(BarcodeCapture capture) async {
     // Already handled (or scanner hidden): ignore duplicate frames.
     if (!_scanning) return;
     final raw = capture.barcodes.firstOrNull?.rawValue?.trim();
@@ -79,9 +80,19 @@ class _PairingPageState extends State<PairingPage> {
       _scanning = false;
       _lan = uri.queryParameters['lan'];
       _e2eSecret = uri.queryParameters['e2e'];
+      final qrPin = uri.queryParameters['pin'];
+      if (qrPin != null && RegExp(r'^\d{6}$').hasMatch(qrPin)) {
+        _qrPin = qrPin;
+        _pin.text = qrPin;
+      }
       _dshPort = int.tryParse(uri.queryParameters['dshPort'] ?? '') ?? 3080;
       _relay.text = '$scheme://${uri.authority}';
     });
+    if (_qrPin != null) {
+      // The QR carries everything: pair immediately, no PIN prompt.
+      await _submit();
+      return;
+    }
     _snack('已从二维码读取中继地址与设备 ID，请输入电脑上显示的 PIN 后确认');
   }
 

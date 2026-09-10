@@ -141,6 +141,7 @@ class AppState extends ChangeNotifier {
         pairedAt: DateTime.now().millisecondsSinceEpoch,
         lan: lan,
         e2eSecret: e2eSecret,
+        pin: pin,
         dshPort: dshPort,
       );
       connections = [
@@ -180,6 +181,7 @@ class AppState extends ChangeNotifier {
         pairedAt: DateTime.now().millisecondsSinceEpoch,
         lan: conn.lan,
         e2eSecret: conn.e2eSecret,
+        pin: conn.pin.isNotEmpty ? conn.pin : pin,
         dshPort: conn.dshPort,
       );
       connections = [
@@ -352,6 +354,7 @@ class SavedConnection {
     required this.pairedAt,
     this.lan,
     this.e2eSecret,
+    this.pin = '',
     this.dshPort = 3080,
   });
 
@@ -369,6 +372,11 @@ class SavedConnection {
   /// desktop bridge out-of-band so the relay cannot read stream payloads.
   final String? e2eSecret;
 
+  /// The relay pairing PIN from the pairing QR (`pin=`). The desktop PIN is
+  /// stable, so an expired session re-pairs silently with it instead of
+  /// prompting again; only QRs without a pin fall back to manual entry.
+  final String pin;
+
   /// Actual dsh port for hosts whose desktop selected a non-default port.
   final int dshPort;
 
@@ -380,6 +388,7 @@ class SavedConnection {
     'pairedAt': pairedAt,
     if (lan != null) 'lan': lan,
     if (e2eSecret != null && e2eSecret!.isNotEmpty) 'e2eSecret': e2eSecret,
+    if (pin.isNotEmpty) 'pin': pin,
     'dshPort': dshPort,
   };
 
@@ -392,6 +401,7 @@ class SavedConnection {
         pairedAt: (json['pairedAt'] as num?)?.toInt() ?? 0,
         lan: json['lan'] as String?,
         e2eSecret: json['e2eSecret'] as String?,
+        pin: json['pin'] as String? ?? '',
         dshPort: (json['dshPort'] as num?)?.toInt() ?? 3080,
       );
 }
