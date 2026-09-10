@@ -51,18 +51,8 @@ class _LinkWebviewPageState extends State<LinkWebviewPage> {
 
   @override
   Widget build(BuildContext context) {
-    final host = Uri.tryParse(widget.url)?.host ?? '链接';
+    // No top bar: content fills the screen; system back/gesture navigates.
     return Scaffold(
-      appBar: AppBar(
-        title: Text(host, overflow: TextOverflow.ellipsis),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: '刷新',
-            onPressed: () => _controller?.reload(),
-          ),
-        ],
-      ),
       body: Stack(
         children: [
           Positioned.fill(
