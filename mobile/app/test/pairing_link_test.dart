@@ -54,12 +54,19 @@ void main() {
     );
   });
 
+  test('any http(s) link is accepted; device is optional there', () {
+    // zcode-style QRs may be plain links: the origin becomes the relay base
+    // and the user completes the device ID manually.
+    final data = parsePairingContent('https://example.com/some/path');
+    expect(data, isNotNull);
+    expect(data!.relayBase, 'https://example.com');
+    expect(data.deviceId, isNull);
+  });
+
   test('rejects non-pairing content', () {
-    expect(parsePairingContent('https://example.com/'), isNull,
-        reason: 'no device= query');
     expect(parsePairingContent('just some text'), isNull);
     expect(parsePairingContent('relay://host/pair'), isNull,
-        reason: 'missing device');
+        reason: 'native QRs must carry device=');
   });
 
   test('invalid PIN is dropped but does not reject the QR', () {

@@ -1,12 +1,13 @@
 /// Parser for pairing QR contents.
 ///
-/// Two shapes are accepted:
+/// Three shapes are accepted:
 /// - the native `relay://<host>/pair?device=…&scheme=…` QR the desktop shells
-///   render, and
-/// - URL-style pairing links (the zcode scan-to-add pattern): any
-///   `http(s)://<host>/<path>?device=…` link carries the same query
-///   parameters; the link's own origin becomes the relay base and its
-///   scheme the transport.
+///   render,
+/// - URL-style pairing links carrying a `device=` query (the zcode
+///   scan-to-add pattern), and
+/// - any other `http(s)` link: its origin still becomes the relay base —
+///   `device` is optional then and the user completes pairing manually.
+///   Unknown/foreign content (text, app-specific schemes) is rejected.
 library;
 
 class PairingData {
@@ -21,7 +22,10 @@ class PairingData {
 
   /// Relay base URL, e.g. `https://relay.example.com`.
   final String relayBase;
-  final String deviceId;
+
+  /// Device ID from the QR/link; null when the link did not carry one (the
+  /// user then completes it manually).
+  final String? deviceId;
   final String? lan;
   final String? e2eSecret;
 
@@ -37,8 +41,10 @@ PairingData? parsePairingContent(String raw) {
   final isRelayQr = raw.startsWith('relay://');
   final isLink = uri.scheme == 'http' || uri.scheme == 'https';
   if (!isRelayQr && !isLink) return null;
+  // relay:// QRs are shell-generated and always carry device=; plain links
+  // are accepted even without one (device typed manually afterwards).
   final device = uri.queryParameters['device'];
-  if (device == null || device.isEmpty) return null;
+  if (isRelayQr && (device == null || device.isEmpty)) return null;
 
   // Scheme precedence: explicit query param (native QRs), then the URL's own
   // scheme (link form), then loopback detection for scheme-less relay QRs.
@@ -58,7 +64,7 @@ PairingData? parsePairingContent(String raw) {
   final pin = uri.queryParameters['pin'];
   return PairingData(
     relayBase: '$scheme://${uri.authority}',
-    deviceId: device,
+    deviceId: (device == null || device.isEmpty) ? null : device,
     lan: uri.queryParameters['lan'],
     e2eSecret: uri.queryParameters['e2e'],
     pin: pin != null && RegExp(r'^\d{6}$').hasMatch(pin) ? pin : null,

@@ -56,16 +56,17 @@ class _PairingPageState extends State<PairingPage> {
     if (!_scanning) return;
     final raw = capture.barcodes.firstOrNull?.rawValue?.trim();
     if (raw == null || raw.isEmpty) return;
-    // Accepts the native relay:// QR and URL-style pairing links (the zcode
-    // scan-to-add pattern): any http(s) link with a device= query pairs the
-    // same way, and every scanned field is persisted with the connection.
+    // Accepts the native relay:// QR and any http(s) link (the zcode
+    // scan-to-add pattern): the link's origin becomes the relay base, and
+    // every recognized field is persisted with the connection. A link
+    // without a device= parameter fills the relay and asks for the rest.
     final data = parsePairingContent(raw);
     if (data == null) {
-      _snack('无法识别的二维码（应为 relay:// 或含 device= 参数的链接）');
+      _snack('无法识别的二维码（应为 relay:// 或 http/https 链接）');
       return;
     }
     setState(() {
-      _deviceId = data.deviceId;
+      _deviceId = data.deviceId ?? _deviceId;
       _fromQR = true;
       _scanning = false;
       _lan = data.lan;
@@ -77,16 +78,34 @@ class _PairingPageState extends State<PairingPage> {
       _dshPort = data.dshPort;
       _relay.text = data.relayBase;
     });
-    if (_qrPin != null) {
+    if (_qrPin != null && data.deviceId != null) {
       // The QR carries everything: pair immediately, no PIN prompt.
       await _submit();
       return;
     }
-    _snack('已从二维码读取中继地址与设备 ID，请输入电脑上显示的 PIN 后确认');
+    _snack(
+      data.deviceId == null
+          ? '已读取中继地址，请补充设备 ID 后连接'
+          : '已从二维码读取中继地址与设备 ID，请输入电脑上显示的 PIN 后确认',
+    );
   }
+
+  // mobile_scanner re-detects the same frame continuously, and the toast
+  // outlives the page — without dedupe one bad scan toasts for seconds and
+  // again after navigating back.
+  DateTime? _lastSnackAt;
+  String? _lastSnackMsg;
 
   void _snack(String msg) {
     if (!mounted) return;
+    final now = DateTime.now();
+    if (msg == _lastSnackMsg &&
+        _lastSnackAt != null &&
+        now.difference(_lastSnackAt!) < const Duration(seconds: 3)) {
+      return;
+    }
+    _lastSnackAt = now;
+    _lastSnackMsg = msg;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
