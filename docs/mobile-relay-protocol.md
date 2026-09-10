@@ -84,6 +84,8 @@ Content-Type: application/json
 
 桌面 PIN 是稳定的（首次生成后持久化），因此配对二维码直接携带 `pin=`：手机扫码即完成配对，无需手动输入；App 把该 PIN 随连接持久化，session 过期时用它静默重新配对（PIN 在桌面端被修改过才回退到手动输入）。
 
+二维码内容兼容两种形式：桌面壳生成的原生 `relay://<host>/pair?…`，以及 **URL 配对链接**（zcode 扫码添加模式）——任何携带 `device=` 查询参数的 `http(s)` 链接都按配对信息处理，链接 origin 即中继地址、链接 scheme 即传输协议。两种形式都会把全部参数（`device`/`pin`/`e2e`/`lan`/`dshPort`）随连接持久化保存。
+
 成功响应包含 `hostId`、`deviceId`、`sessionToken` 和 `refreshToken`。App 之后连接 Device WSS 时携带：
 
 ```http

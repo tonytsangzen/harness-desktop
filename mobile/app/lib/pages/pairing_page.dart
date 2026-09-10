@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../core/app_state.dart';
+import '../core/pairing_link.dart';
 
 class PairingPage extends StatefulWidget {
   const PairingPage({super.key, required this.state});
@@ -55,38 +56,26 @@ class _PairingPageState extends State<PairingPage> {
     if (!_scanning) return;
     final raw = capture.barcodes.firstOrNull?.rawValue?.trim();
     if (raw == null || raw.isEmpty) return;
-    if (!raw.startsWith('relay://')) {
-      _snack('无法识别的二维码（应为 relay:// 开头）');
+    // Accepts the native relay:// QR and URL-style pairing links (the zcode
+    // scan-to-add pattern): any http(s) link with a device= query pairs the
+    // same way, and every scanned field is persisted with the connection.
+    final data = parsePairingContent(raw);
+    if (data == null) {
+      _snack('无法识别的二维码（应为 relay:// 或含 device= 参数的链接）');
       return;
     }
-    final uri = Uri.tryParse(raw);
-    final device = uri?.queryParameters['device'];
-    if (uri == null || device == null || device.isEmpty) {
-      _snack('二维码缺少设备 ID，请重新生成');
-      return;
-    }
-    // Use the scheme carried by the QR code (http for plaintext test relays);
-    // fall back to loopback detection for older QR codes without one.
-    final schemeParam = uri.queryParameters['scheme'];
-    final host = uri.host;
-    final scheme = (schemeParam == 'http' || schemeParam == 'https')
-        ? schemeParam
-        : (host == 'localhost' || host == '::1' || host.startsWith('127.')
-              ? 'http'
-              : 'https');
     setState(() {
-      _deviceId = device;
+      _deviceId = data.deviceId;
       _fromQR = true;
       _scanning = false;
-      _lan = uri.queryParameters['lan'];
-      _e2eSecret = uri.queryParameters['e2e'];
-      final qrPin = uri.queryParameters['pin'];
-      if (qrPin != null && RegExp(r'^\d{6}$').hasMatch(qrPin)) {
-        _qrPin = qrPin;
-        _pin.text = qrPin;
+      _lan = data.lan;
+      _e2eSecret = data.e2eSecret;
+      if (data.pin != null) {
+        _qrPin = data.pin;
+        _pin.text = data.pin!;
       }
-      _dshPort = int.tryParse(uri.queryParameters['dshPort'] ?? '') ?? 3080;
-      _relay.text = '$scheme://${uri.authority}';
+      _dshPort = data.dshPort;
+      _relay.text = data.relayBase;
     });
     if (_qrPin != null) {
       // The QR carries everything: pair immediately, no PIN prompt.
