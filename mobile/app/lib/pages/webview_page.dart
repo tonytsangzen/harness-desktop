@@ -12,6 +12,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
 import '../core/app_state.dart';
@@ -41,6 +42,9 @@ class _WebviewPageState extends State<WebviewPage>
   @override
   void initState() {
     super.initState();
+    // Immersive fullscreen for the remote view: status/navigation bars hide,
+    // a swipe from the edge reveals them temporarily (sticky).
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WidgetsBinding.instance.addObserver(this);
     _wasOnline = widget.state.connected;
     widget.state.addListener(_onStateChanged);
@@ -195,6 +199,7 @@ class _WebviewPageState extends State<WebviewPage>
 
   @override
   void dispose() {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     WidgetsBinding.instance.removeObserver(this);
     widget.state.removeListener(_onStateChanged);
     ForegroundService.stop();
