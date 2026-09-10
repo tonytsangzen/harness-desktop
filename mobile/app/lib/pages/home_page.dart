@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 
 import '../core/app_state.dart';
 import '../core/relay_client.dart';
+import 'link_webview_page.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key, required this.state});
@@ -25,6 +26,15 @@ class _HomePageState extends State<HomePage> {
   String? _error;
 
   Future<void> _connect(SavedConnection conn) async {
+    // http(s) direct-link entries open as a plain WebView — the private
+    // protocol path (pairing, relay tunnel) does not apply to them.
+    if (conn.link.startsWith('http://') ||
+        conn.link.startsWith('https://')) {
+      Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => LinkWebviewPage(url: conn.link)),
+      );
+      return;
+    }
     setState(() {
       _connecting = true;
       _error = null;

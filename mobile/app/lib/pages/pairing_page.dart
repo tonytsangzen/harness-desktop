@@ -6,6 +6,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../core/app_state.dart';
 import '../core/pairing_link.dart';
+import 'link_webview_page.dart';
 
 class PairingPage extends StatefulWidget {
   const PairingPage({super.key, required this.state});
@@ -59,8 +60,9 @@ class _PairingPageState extends State<PairingPage> {
     // Two channels, distinguished semantically:
     // - relay:// → this app's pairing QR: parsed and validated, auto-pairs;
     // - anything else with a URI scheme → the zcode direct-link channel:
-    //   NO validation, the link is saved verbatim (with any device/pin/e2e
-    //   params carried along) and the page returns to the saved list.
+    //   NO validation, the link is saved verbatim. http(s) links open
+    //   directly in a plain WebView — no private protocol, no tunnel;
+    //   other schemes are saved as connection cards.
     if (!raw.startsWith('relay://')) {
       final link = parseDirectLink(raw);
       if (link == null) {
@@ -81,6 +83,18 @@ class _PairingPageState extends State<PairingPage> {
         ),
       );
       if (!mounted) return;
+      final isHttp =
+          link.raw.startsWith('http://') || link.raw.startsWith('https://');
+      if (isHttp) {
+        // Open the plain WebView instead of the private-protocol path; the
+        // saved card remains on the home list.
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(
+            builder: (_) => LinkWebviewPage(url: link.raw),
+          ),
+        );
+        return;
+      }
       _snack('已保存链接');
       Navigator.of(context).pop();
       return;
