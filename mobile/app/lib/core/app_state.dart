@@ -109,6 +109,18 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// Save a direct-link (zcode) entry: no pairing, the link is kept
+  /// verbatim; deduped by link.
+  Future<void> addLinkConnection(SavedConnection conn) async {
+    connections = [
+      ...connections.where((c) => c.link != conn.link),
+      conn,
+    ]..sort((a, b) => b.pairedAt.compareTo(a.pairedAt));
+    currentConnection = conn;
+    await _saveConnections();
+    notifyListeners();
+  }
+
   /// Remove a saved connection (not revoked on the relay, just locally).
   Future<void> removeConnection(SavedConnection conn) async {
     connections = connections
@@ -355,6 +367,7 @@ class SavedConnection {
     this.lan,
     this.e2eSecret,
     this.pin = '',
+    this.link = '',
     this.dshPort = 3080,
   });
 
@@ -377,6 +390,10 @@ class SavedConnection {
   /// prompting again; only QRs without a pin fall back to manual entry.
   final String pin;
 
+  /// The raw scanned link for direct-link (zcode) entries; empty for
+  /// native pairings.
+  final String link;
+
   /// Actual dsh port for hosts whose desktop selected a non-default port.
   final int dshPort;
 
@@ -389,6 +406,7 @@ class SavedConnection {
     if (lan != null) 'lan': lan,
     if (e2eSecret != null && e2eSecret!.isNotEmpty) 'e2eSecret': e2eSecret,
     if (pin.isNotEmpty) 'pin': pin,
+    if (link.isNotEmpty) 'link': link,
     'dshPort': dshPort,
   };
 
@@ -402,6 +420,7 @@ class SavedConnection {
         lan: json['lan'] as String?,
         e2eSecret: json['e2eSecret'] as String?,
         pin: json['pin'] as String? ?? '',
+        link: json['link'] as String? ?? '',
         dshPort: (json['dshPort'] as num?)?.toInt() ?? 3080,
       );
 }

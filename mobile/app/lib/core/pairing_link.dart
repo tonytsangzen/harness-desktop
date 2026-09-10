@@ -34,6 +34,48 @@ class PairingData {
   final int dshPort;
 }
 
+class DirectLink {
+  const DirectLink({
+    required this.raw,
+    required this.origin,
+    this.device,
+    this.pin,
+    this.e2eSecret,
+    this.lan,
+    this.dshPort = 3080,
+  });
+
+  /// The scanned link, saved verbatim.
+  final String raw;
+
+  /// `scheme://authority` of the link — used as the relay base when
+  /// connecting (the direct-link channel).
+  final String origin;
+  final String? device;
+  final String? pin;
+  final String? e2eSecret;
+  final String? lan;
+  final int dshPort;
+}
+
+/// The zcode scan-to-save channel: **no validation**. Any scanned content
+/// carrying a URI scheme is treated as a link; parameters are extracted
+/// verbatim without format checks (PIN length, device shape, etc.). Only
+/// unparseable text without a scheme is rejected.
+DirectLink? parseDirectLink(String raw) {
+  final uri = Uri.tryParse(raw.trim());
+  if (uri == null || uri.scheme.isEmpty) return null;
+  return DirectLink(
+    raw: raw.trim(),
+    origin: uri.hasAuthority ? '${uri.scheme}://${uri.authority}' : raw.trim(),
+    device: uri.queryParameters['device'],
+    pin: uri.queryParameters['pin'],
+    e2eSecret: uri.queryParameters['e2e'],
+    lan: uri.queryParameters['lan'],
+    dshPort: int.tryParse(uri.queryParameters['dshPort'] ?? '') ?? 3080,
+  );
+}
+
 /// Parses [raw] QR content; returns null when it is not a pairing QR/link.
 PairingData? parsePairingContent(String raw) {
   final uri = Uri.tryParse(raw.trim());

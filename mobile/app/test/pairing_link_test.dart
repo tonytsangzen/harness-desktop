@@ -76,4 +76,33 @@ void main() {
     expect(data, isNotNull);
     expect(data!.pin, isNull);
   });
+
+  directLinkTests();
+}
+
+void directLinkTests() {
+  test('direct-link channel accepts any schemed content without validation',
+      () {
+    final link = parseDirectLink(
+      'https://relay.example.com/xyz?device=abc&pin=12&e2e=zz',
+    );
+    expect(link, isNotNull);
+    expect(link!.raw, 'https://relay.example.com/xyz?device=abc&pin=12&e2e=zz');
+    expect(link.origin, 'https://relay.example.com');
+    expect(link.device, 'abc');
+    // No format checks: a 2-digit PIN is kept verbatim.
+    expect(link.pin, '12');
+    expect(link.e2eSecret, 'zz');
+  });
+
+  test('direct-link keeps custom schemes and query-less links', () {
+    expect(parseDirectLink('zcode://join/abc123')!.origin, 'zcode://join');
+    expect(parseDirectLink('http://10.0.0.2:18445')!.origin,
+        'http://10.0.0.2:18445');
+  });
+
+  test('direct-link rejects only scheme-less text', () {
+    expect(parseDirectLink('just some text'), isNull);
+    expect(parseDirectLink(''), isNull);
+  });
 }

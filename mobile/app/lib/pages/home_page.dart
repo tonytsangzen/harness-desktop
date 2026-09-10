@@ -207,9 +207,14 @@ class _HomePageState extends State<HomePage> {
           backgroundColor: theme.colorScheme.primaryContainer,
           child: Icon(Icons.computer, color: theme.colorScheme.onPrimaryContainer),
         ),
-        title: Text(conn.hostId, style: const TextStyle(fontWeight: FontWeight.w600)),
+        title: Text(
+          conn.hostId.isNotEmpty
+              ? conn.hostId
+              : (conn.link.isNotEmpty ? '链接连接' : conn.hostId),
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
         subtitle: Text(
-          conn.relay,
+          conn.link.isNotEmpty ? conn.link : conn.relay,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: theme.textTheme.bodySmall,

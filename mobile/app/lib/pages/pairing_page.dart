@@ -56,10 +56,35 @@ class _PairingPageState extends State<PairingPage> {
     if (!_scanning) return;
     final raw = capture.barcodes.firstOrNull?.rawValue?.trim();
     if (raw == null || raw.isEmpty) return;
-    // Accepts the native relay:// QR and any http(s) link (the zcode
-    // scan-to-add pattern): the link's origin becomes the relay base, and
-    // every recognized field is persisted with the connection. A link
-    // without a device= parameter fills the relay and asks for the rest.
+    // Two channels, distinguished semantically:
+    // - relay:// → this app's pairing QR: parsed and validated, auto-pairs;
+    // - anything else with a URI scheme → the zcode direct-link channel:
+    //   NO validation, the link is saved verbatim (with any device/pin/e2e
+    //   params carried along) and the page returns to the saved list.
+    if (!raw.startsWith('relay://')) {
+      final link = parseDirectLink(raw);
+      if (link == null) {
+        _snack('无法识别的内容');
+        return;
+      }
+      await widget.state.addLinkConnection(
+        SavedConnection(
+          relay: link.origin,
+          hostId: link.device ?? '',
+          sessionToken: '',
+          refreshToken: '',
+          pairedAt: DateTime.now().millisecondsSinceEpoch,
+          e2eSecret: link.e2eSecret,
+          pin: link.pin ?? '',
+          link: link.raw,
+          dshPort: link.dshPort,
+        ),
+      );
+      if (!mounted) return;
+      _snack('已保存链接');
+      Navigator.of(context).pop();
+      return;
+    }
     final data = parsePairingContent(raw);
     if (data == null) {
       _snack('无法识别的二维码（应为 relay:// 或 http/https 链接）');
