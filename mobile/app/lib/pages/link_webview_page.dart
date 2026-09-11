@@ -17,6 +17,7 @@ class LinkWebviewPage extends StatefulWidget {
 class _LinkWebviewPageState extends State<LinkWebviewPage> {
   WebViewController? _controller;
   String? _error;
+  bool _canGoBack = false;
 
   @override
   void initState() {
@@ -32,7 +33,11 @@ class _LinkWebviewPageState extends State<LinkWebviewPage> {
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (_) {
-            if (mounted) setState(() => _error = null);
+            if (!mounted) return;
+            setState(() => _error = null);
+            _controller?.canGoBack().then((v) {
+              if (mounted) setState(() => _canGoBack = v);
+            });
           },
           onWebResourceError: (err) {
             if (err.isForMainFrame == true && mounted) {
@@ -51,7 +56,9 @@ class _LinkWebviewPageState extends State<LinkWebviewPage> {
 
   @override
   Widget build(BuildContext context) {
-    // No top bar: content fills the screen; system back/gesture navigates.
+    // No app bar: content fills the screen. A floating back button at the
+    // top-left steps back through the WebView history first, and leaves the
+    // page once there is no in-web history left.
     return Scaffold(
       body: Stack(
         children: [
@@ -59,6 +66,21 @@ class _LinkWebviewPageState extends State<LinkWebviewPage> {
             child: _controller == null
                 ? Center(child: Text(_error ?? ''))
                 : WebViewWidget(controller: _controller!),
+          ),
+          Positioned(
+            left: 12,
+            top: MediaQuery.paddingOf(context).top + 8,
+            child: _BackButton(
+              visible: _canGoBack,
+              onTap: () {
+                final controller = _controller;
+                if (controller != null && _canGoBack) {
+                  controller.goBack();
+                } else if (mounted) {
+                  Navigator.of(context).maybePop();
+                }
+              },
+            ),
           ),
           if (_error != null && _controller != null)
             Positioned.fill(
@@ -81,6 +103,31 @@ class _LinkWebviewPageState extends State<LinkWebviewPage> {
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+/// Translucent circular back affordance that only shows while the WebView
+/// has in-page history to go back to.
+class _BackButton extends StatelessWidget {
+  const _BackButton({required this.visible, required this.onTap});
+  final bool visible;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!visible) return const SizedBox.shrink();
+    return Material(
+      color: Colors.black.withValues(alpha: 0.35),
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: const Padding(
+          padding: EdgeInsets.all(10),
+          child: Icon(Icons.arrow_back, color: Colors.white, size: 22),
+        ),
       ),
     );
   }
