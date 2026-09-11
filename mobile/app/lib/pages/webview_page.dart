@@ -29,8 +29,7 @@ class WebviewPage extends StatefulWidget {
   State<WebviewPage> createState() => _WebviewPageState();
 }
 
-class _WebviewPageState extends State<WebviewPage>
-    with WidgetsBindingObserver {
+class _WebviewPageState extends State<WebviewPage> with WidgetsBindingObserver {
   WebProxy? _proxy;
   PortBackend? _proxyBackend; // the backend the running proxy dials through
   WebViewController? _controller;
@@ -266,58 +265,68 @@ class _WebviewPageState extends State<WebviewPage>
     // on top via Stack instead.
     final showReconnecting =
         !_lanMode && !widget.state.connected && _controller != null;
-    return Scaffold(
-      body: Stack(
-        children: [
-          Positioned.fill(
-            child: _error != null
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            _error!,
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: Theme.of(context).colorScheme.error,
+    // The remote view replaces the home route, so an unguarded system back
+    // would exit the app — route it to the connection list instead. dispose()
+    // tears the tunnel/proxy/foreground-service down on navigation.
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop || !mounted) return;
+        Navigator.of(context).pushReplacementNamed('/');
+      },
+      child: Scaffold(
+        body: Stack(
+          children: [
+            Positioned.fill(
+              child: _error != null
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _error!,
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Theme.of(context).colorScheme.error,
+                              ),
                             ),
-                          ),
-                          const SizedBox(height: 16),
-                          FilledButton.icon(
-                            onPressed: _retry,
-                            icon: const Icon(Icons.refresh),
-                            label: const Text('重试'),
-                          ),
-                        ],
+                            const SizedBox(height: 16),
+                            FilledButton.icon(
+                              onPressed: _retry,
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('重试'),
+                            ),
+                          ],
+                        ),
                       ),
+                    )
+                  : _controller == null
+                  ? const Center(child: CircularProgressIndicator())
+                  : SafeArea(
+                      // Keep the web view below the system status bar / notch.
+                      child: WebViewWidget(controller: _controller!),
                     ),
-                  )
-                : _controller == null
-                ? const Center(child: CircularProgressIndicator())
-                : SafeArea(
-                    // Keep the web view below the system status bar / notch.
-                    child: WebViewWidget(controller: _controller!),
-                  ),
-          ),
-          if (showReconnecting)
-            const Positioned.fill(
-              child: ColoredBox(
-                color: Color(0xE6FFFFFF),
-                child: Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      CircularProgressIndicator(),
-                      SizedBox(height: 16),
-                      Text('连接已断开，正在重新连接…'),
-                    ],
+            ),
+            if (showReconnecting)
+              const Positioned.fill(
+                child: ColoredBox(
+                  color: Color(0xE6FFFFFF),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        CircularProgressIndicator(),
+                        SizedBox(height: 16),
+                        Text('连接已断开，正在重新连接…'),
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
