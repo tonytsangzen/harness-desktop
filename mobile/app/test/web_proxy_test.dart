@@ -264,6 +264,55 @@ void main() {
     expect(text.endsWith('</html>'), isTrue);
   });
 
+  test('chunked HTML without an injectable marker keeps valid framing',
+      () async {
+    // Uppercase <HTML> and no <head>: nothing to inject, but the scanner
+    // still consumed the original chunk framing — the collected body must be
+    // re-framed as a synthetic chunk (and terminated) or the browser parses
+    // HTML text as chunk-size lines and the response is corrupt.
+    final (proxy, backend) = await startProxy();
+    addTearDown(proxy.close);
+    final socket = await Socket.connect(
+      InternetAddress.loopbackIPv4,
+      proxy.port,
+    );
+    final reader = startReader(socket);
+
+    final chunk1 = utf8.encode('<HTML><BODY>dsh-index');
+    final chunk2 = utf8.encode('</BODY></HTML>');
+    final response = await roundTrip(
+      reader,
+      await connectedStream(backend, socket),
+      socket,
+      getRequest('/'),
+      [
+        ...utf8.encode(
+          'HTTP/1.1 200 OK\r\n'
+          'Content-Type: text/html\r\n'
+          'Transfer-Encoding: chunked\r\n\r\n',
+        ),
+        ...utf8.encode('${chunk1.length.toRadixString(16)}\r\n'),
+        ...chunk1,
+        ...utf8.encode('\r\n${chunk2.length.toRadixString(16)}\r\n'),
+        ...chunk2,
+        ...utf8.encode('\r\n0\r\n\r\n'),
+      ],
+    );
+
+    expect(response.status, 200);
+    final text = response.bodyText;
+    expect(text, contains('dsh-index'));
+    expect(text.endsWith('</HTML>'), isTrue);
+    expect(text, isNot(contains('Promise.withResolvers')));
+    expect(
+      utf8.decode(reader.received, allowMalformed: true).endsWith('0\r\n\r\n'),
+      isTrue,
+      reason: utf8
+          .decode(reader.received, allowMalformed: true)
+          .replaceAll('\r\n', '|'),
+    );
+  });
+
   test('never touches JavaScript bundles even when they mention <head>',
       () async {
     final (proxy, backend) = await startProxy();

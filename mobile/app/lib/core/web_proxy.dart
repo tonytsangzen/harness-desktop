@@ -329,7 +329,9 @@ class _Downlink {
   static const int _maxScanBodyBytes = 64 * 1024;
 
   void add(List<int> bytes) {
-    print('[dl] add ${bytes.length}B upgraded=${_state.upgraded} inHead=$_inHead');
+    print(
+      '[dl] add ${bytes.length}B upgraded=${_state.upgraded} inHead=$_inHead',
+    );
     if (_state.upgraded) {
       _send(bytes);
       return;
@@ -399,7 +401,8 @@ class _Downlink {
       lines.removeLast();
     }
     final status = int.tryParse(lines.first.split(' ').elementAt(1)) ?? 0;
-    final bodyless = status < 200 ||
+    final bodyless =
+        status < 200 ||
         status == 204 ||
         status == 304 ||
         _state.requestMethod == 'HEAD';
@@ -427,7 +430,8 @@ class _Downlink {
       }
     }
 
-    final injectable = status == 200 &&
+    final injectable =
+        status == 200 &&
         contentType.contains('text/html') &&
         contentEncoding.isEmpty;
 
@@ -533,15 +537,6 @@ class _Downlink {
 
     var head = '${lines.join('\r\n')}\r\n\r\n';
     var payload = body;
-    // Chunked responses: injected bytes are re-framed as one synthetic
-    // chunk; the scanner resumes at the next original chunk boundary.
-    if (injectAt >= 0 && _chunkPassthrough) {
-      payload = [
-        ...utf8.encode('${payload.length.toRadixString(16)}\r\n'),
-        ...payload,
-        ...utf8.encode('\r\n'),
-      ];
-    }
     if (injectAt >= 0) {
       final script = utf8.encode('<script>${WebProxy.polyfillJs}</script>');
       payload = <int>[
@@ -567,19 +562,22 @@ class _Downlink {
       }
       if (!hasCacheControl) out.add('Cache-Control: no-store');
       head = '${out.join('\r\n')}\r\n\r\n';
-      // Chunked responses: the injected bytes are re-framed as one synthetic
-      // chunk; the scanner resumes at the next original chunk boundary. When
-      // the scan already consumed the original terminal chunk, a fresh one
-      // terminates the re-framed stream.
-      if (_chunkPassthrough) {
-        payload = [
-          ...utf8.encode('${payload.length.toRadixString(16)}\r\n'),
-          ...payload,
-          ...utf8.encode('\r\n'),
-        ];
-        if (_scanner.done) {
-          payload.addAll(utf8.encode('0\r\n\r\n'));
-        }
+    }
+    // Chunked responses: the scanner consumed the original chunk framing
+    // while scanning, so the collected data must be re-framed as one
+    // synthetic chunk whether or not anything was injected — emitting it raw
+    // would make the browser parse HTML text as chunk-size lines and corrupt
+    // everything that follows. The passthrough resumes at the next original
+    // chunk's size line; when the scan already consumed the terminal chunk,
+    // a fresh one terminates the re-framed stream.
+    if (chunked) {
+      payload = [
+        ...utf8.encode('${payload.length.toRadixString(16)}\r\n'),
+        ...payload,
+        ...utf8.encode('\r\n'),
+      ];
+      if (_scanner.done) {
+        payload.addAll(utf8.encode('0\r\n\r\n'));
       }
     }
     _send(utf8.encode(head));
@@ -647,8 +645,11 @@ class _ChunkScanner {
           }
           _line.addAll(buf.getRange(i, nl));
           final size =
-              int.tryParse(latin1.decode(_line).split(';').first.trim(), radix: 16) ??
-                  -1;
+              int.tryParse(
+                latin1.decode(_line).split(';').first.trim(),
+                radix: 16,
+              ) ??
+              -1;
           _line.clear();
           i = nl + 2;
           if (size < 0) {

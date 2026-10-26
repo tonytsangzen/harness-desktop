@@ -11,6 +11,8 @@
 /// All non-LAN traffic goes through the relay tunnel.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -38,6 +40,22 @@ class _WebviewPageState extends State<WebviewPage> with WidgetsBindingObserver {
   bool _fellBack = false; // already fell back from LAN to the relay tunnel
   bool _wasOnline = true; // last observed tunnel status (for edge detection)
 
+  // Long-session rendering recovery. Hours of WebView uptime (lock/unlock
+  // cycles in between, memory pressure from other apps) can kill the web
+  // content/renderer process or corrupt the compositor surface; the page then
+  // sits there garbled or frozen forever. The platform APIs for this are not
+  // uniformly exposed (iOS surfaces it as a main-frame resource error,
+  // Android's onRenderProcessGone is missing from the plugin entirely), so
+  // the watchdog below probes the page and escalates on failure.
+  static const int _webContentProcessTerminatedCode = 2; // WKErrorCode, iOS
+  Timer? _probeTimer;
+  bool _probing = false; // one probe at a time
+  bool _pageReady = false; // first page finished loading on this controller
+  int _probeFailures = 0; // consecutive failed renderer probes
+  int _recoveries = 0; // automatic recoveries since the last successful load
+  int _generation = 0; // bumped per platform-view rebuild (fresh surface)
+  DateTime? _lastManualRefresh;
+
   @override
   void initState() {
     super.initState();
@@ -47,15 +65,21 @@ class _WebviewPageState extends State<WebviewPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     _wasOnline = widget.state.connected;
     widget.state.addListener(_onStateChanged);
+    _probeTimer = Timer.periodic(const Duration(seconds: 60), (_) {
+      _probeAndRecover();
+    });
     _bootstrap();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // Screen unlocked / app back in foreground: the tunnel likely died while
-    // locked — skip the remaining backoff and reconnect right away.
+    // locked — skip the remaining backoff and reconnect right away. The
+    // renderer is the usual casualty of background time, so also probe it
+    // now instead of making the user stare at a garbled page for a minute.
     if (state == AppLifecycleState.resumed) {
       widget.state.resumeReconnect();
+      _probeAndRecover();
     }
   }
 
@@ -106,6 +130,106 @@ class _WebviewPageState extends State<WebviewPage> with WidgetsBindingObserver {
         .catchError((Object e) {
           if (mounted) setState(() => _error = '启动本地代理失败: $e');
         });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Long-session rendering recovery
+  // ---------------------------------------------------------------------------
+
+  /// Periodic + on-resume renderer health probe. `1+1` costs nothing even on
+  /// a busy page; a dead renderer (killed web content process, OOM) either
+  /// never answers or answers with garbage. Two consecutive failures mean the
+  /// page is really gone — a busy-but-alive renderer recovers within one
+  /// probe, so a single timeout never reloads on its own.
+  Future<void> _probeAndRecover() async {
+    if (!mounted || _probing) return;
+    final c = _controller;
+    if (c == null || _error != null || !_pageReady) return;
+    // Tunnel down: the page is stale by design; the restore path reloads it.
+    if (!_lanMode && !widget.state.connected) return;
+    _probing = true;
+    var alive = false;
+    try {
+      final r = await c
+          .runJavaScriptReturningResult('1+1')
+          .timeout(const Duration(seconds: 6));
+      alive = r.toString().contains('2');
+    } catch (_) {
+      alive = false; // threw or timed out: renderer not answering
+    } finally {
+      _probing = false;
+    }
+    if (alive) {
+      _probeFailures = 0;
+      return;
+    }
+    _probeFailures++;
+    await _recoverFromDeadRenderer('renderer probe failed ($_probeFailures)');
+  }
+
+  /// Escalating recovery for a dead/garbled renderer: a plain reload usually
+  /// brings the web process back; repeated failures mean the platform view or
+  /// its surface is corrupt, so rebuild it from scratch. Bounded like the
+  /// desktop shell's termination handling so a crash loop surfaces as an
+  /// error instead of thrashing.
+  Future<void> _recoverFromDeadRenderer(String reason) async {
+    if (!mounted) return;
+    if (!_lanMode && !widget.state.connected) {
+      print('[dsh] $reason while the tunnel is down; waiting for restore');
+      return;
+    }
+    if (_recoveries >= 3) {
+      print('[dsh] $reason: giving up after $_recoveries recoveries');
+      setState(() {
+        _error = '页面进程多次崩溃，已停止自动恢复。\n请点击右下角刷新按钮，或返回后重新进入。';
+      });
+      return;
+    }
+    _recoveries++;
+    print('[dsh] $reason: recovery attempt $_recoveries');
+    if (_recoveries == 1) {
+      await _controller?.reload();
+    } else {
+      await _rebuildWebView();
+    }
+  }
+
+  /// Tear down the platform view (fresh [WebViewWidget] via the generation
+  /// key) and load the app URL again. The proxy keeps running; the dsh
+  /// session cookie outlives the view, so the reload re-authenticates
+  /// silently.
+  Future<void> _rebuildWebView() async {
+    final proxy = _proxy;
+    if (proxy == null) return;
+    print(
+      '[dsh] rebuilding the webview platform view (generation $_generation)',
+    );
+    final controller = _buildController();
+    if (!mounted) return;
+    setState(() {
+      _generation++;
+      _controller = controller;
+      _pageReady = false;
+      _probeFailures = 0;
+      _pluginRetries = 0;
+    });
+    await controller.loadRequest(_appUrl(proxy.port));
+  }
+
+  /// Manual escape hatch for corruption the watchdog cannot see (a garbled
+  /// compositor surface with a live renderer renders fine to JavaScript).
+  /// First tap reloads in place; a second tap within a few seconds means the
+  /// reload did not clear the garbage, so rebuild the platform view.
+  void _manualRefresh() {
+    final now = DateTime.now();
+    final last = _lastManualRefresh;
+    _lastManualRefresh = now;
+    if (last != null && now.difference(last) < const Duration(seconds: 5)) {
+      _rebuildWebView();
+      return;
+    }
+    setState(() => _error = null);
+    _controller?.reload();
   }
 
   Future<void> _bootstrap() async {
@@ -166,6 +290,11 @@ class _WebviewPageState extends State<WebviewPage> with WidgetsBindingObserver {
       ..setNavigationDelegate(
         NavigationDelegate(
           onPageFinished: (_) {
+            // A finished load proves the renderer is back, so the recovery
+            // ladder (and its bound) restarts from a clean slate.
+            _recoveries = 0;
+            _probeFailures = 0;
+            _pageReady = true;
             if (_error != null && mounted) setState(() => _error = null);
             _shrinkToFitDesktop();
             _retryFailedPlugins();
@@ -175,21 +304,26 @@ class _WebviewPageState extends State<WebviewPage> with WidgetsBindingObserver {
             print(
               '[webview] resource error: ${err.errorCode} ${err.description} url=${err.url} main=${err.isForMainFrame}',
             );
+            if (err.isForMainFrame != true || !mounted) return;
+            // iOS: the system killed the web content process (long-session
+            // memory pressure). Not a connectivity problem — reload instead
+            // of showing the offline message. (Android never reports positive
+            // error codes, so matching this code is unambiguous.)
+            if (err.errorCode == _webContentProcessTerminatedCode) {
+              _recoverFromDeadRenderer('web content process terminated');
+              return;
+            }
             // The tunnel fails with 502 when the desktop host is offline —
             // show a clear message instead of a blank page. A failing direct
             // LAN load falls back to the relay tunnel first.
-            if (err.isForMainFrame == true && mounted) {
-              if (_lanMode && !_fellBack) {
-                _fellBack = true;
-                _lanMode = false;
-                _proxy?.close();
-                _proxy = null;
-                _startTunnel();
-              } else {
-                setState(
-                  () => _error = '无法加载电脑端页面。\n请确认电脑上的 Harness 已打开，然后重试。',
-                );
-              }
+            if (_lanMode && !_fellBack) {
+              _fellBack = true;
+              _lanMode = false;
+              _proxy?.close();
+              _proxy = null;
+              _startTunnel();
+            } else {
+              setState(() => _error = '无法加载电脑端页面。\n请确认电脑上的 Harness 已打开，然后重试。');
             }
           },
         ),
@@ -200,6 +334,7 @@ class _WebviewPageState extends State<WebviewPage> with WidgetsBindingObserver {
   void dispose() {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     WidgetsBinding.instance.removeObserver(this);
+    _probeTimer?.cancel();
     widget.state.removeListener(_onStateChanged);
     ForegroundService.stop();
     _proxy?.close();
@@ -231,7 +366,14 @@ class _WebviewPageState extends State<WebviewPage> with WidgetsBindingObserver {
 
   void _retry() {
     setState(() => _error = null);
-    _controller?.reload();
+    // With a proxy alive, rebuild the platform view — the error may be the
+    // bounded-recovery give-up, where reload() alone would not clear a
+    // corrupt surface. Without one (proxy/port failure) restart the bootstrap.
+    if (_proxy != null) {
+      _rebuildWebView();
+    } else {
+      _bootstrap();
+    }
   }
 
   int _pluginRetries = 0;
@@ -306,7 +448,12 @@ class _WebviewPageState extends State<WebviewPage> with WidgetsBindingObserver {
                   ? const Center(child: CircularProgressIndicator())
                   : SafeArea(
                       // Keep the web view below the system status bar / notch.
-                      child: WebViewWidget(controller: _controller!),
+                      // The generation key gives the recovery path a brand
+                      // new platform view instead of a possibly-corrupt one.
+                      child: WebViewWidget(
+                        key: ValueKey('dsh-webview-$_generation'),
+                        controller: _controller!,
+                      ),
                     ),
             ),
             if (showReconnecting)
@@ -321,6 +468,35 @@ class _WebviewPageState extends State<WebviewPage> with WidgetsBindingObserver {
                         SizedBox(height: 16),
                         Text('连接已断开，正在重新连接…'),
                       ],
+                    ),
+                  ),
+                ),
+              ),
+            // Escape hatch for rendering corruption the watchdog cannot
+            // detect (garbled surface with a live renderer): tap once to
+            // reload, tap again within seconds to rebuild the platform view.
+            if (_controller != null && _error == null && !showReconnecting)
+              Positioned(
+                right: 12,
+                bottom: 12,
+                child: SafeArea(
+                  child: Opacity(
+                    opacity: 0.6,
+                    child: Material(
+                      color: Colors.black38,
+                      shape: const CircleBorder(),
+                      clipBehavior: Clip.antiAlias,
+                      child: InkWell(
+                        onTap: _manualRefresh,
+                        child: const Padding(
+                          padding: EdgeInsets.all(10),
+                          child: Icon(
+                            Icons.refresh,
+                            size: 20,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 ),
