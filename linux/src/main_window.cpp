@@ -1506,9 +1506,9 @@ void MainWindow::StartMobileBridge(const std::string& relay, const std::string& 
     std::string hostToken = ReadFileText(ConfigDir() + "/hosttoken");
     const std::string e2eSecret = E2ESecret();
     std::string dshToken;
-    const auto tokenPos = self->authUrl_.find("?token=");
+    const auto tokenPos = authUrl_.find("?token=");
     if (tokenPos != std::string::npos) {
-        dshToken = self->authUrl_.substr(tokenPos + 7);
+        dshToken = authUrl_.substr(tokenPos + 7);
         const auto end = dshToken.find_first_of("&#");
         if (end != std::string::npos) dshToken.resize(end);
     }
