@@ -316,3 +316,7 @@ dsh 前端更新后，`dsh web` 启动改为颁发带 token 的 URL（`dsh web: 
 
 - Bundle identifier 由 `com.deepseek.dsh-webview` 改为 `com.deepvisus.harness-desktop`。
 - README 结构重写，新增安装、运行时供给、签名与公证等章节。
+
+### 修复（Linux 编译失败，1.2.3 首个标签未产出安装包）
+
+dsh token 改动把 `authUrl_` 误写成 `self->authUrl_`，而 `StartMobileBridge` 是普通成员函数——`self` 只存在于 C 风格回调里（由 `userData` 转换得到）。Linux 构建在该改动后一直失败，`v1.2.3` 首个标签的发布因此无任何安装包。改为直接使用 `authUrl_`，重新打标签发布。
