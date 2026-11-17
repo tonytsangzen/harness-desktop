@@ -7,7 +7,11 @@ plugins {
 
 android {
     namespace = "com.deepseekharness.dsh_mobile"
-    compileSdk = flutter.compileSdkVersion
+    // mobile_scanner compiles against API 36. AGP fails the release build when
+    // a dependency is compiled against a newer API than the app ("What went
+    // wrong: 25.0.5" — an AAR metadata checkError), so pin above Flutter's
+    // default here rather than relying on flutter.compileSdkVersion.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
